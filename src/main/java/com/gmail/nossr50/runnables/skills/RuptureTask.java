@@ -95,6 +95,9 @@ public class RuptureTask extends CancellableRunnable {
 
             double damagedHealth = healthBeforeRuptureIsApplied - damage;
 
+            /* Prevent the Target entity's health from being set above 20.0 which can sometimes happen when an entity has a health boosting
+            item or potion effect. */
+            if (damagedHealth > 20.0) damagedHealth = 20.0;
             targetEntity.setHealth(damagedHealth); //Hurt entity without the unwanted side effects of damage()}
         }
 
