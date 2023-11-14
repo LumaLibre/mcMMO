@@ -41,6 +41,7 @@ public class XPBarCommand implements TabExecutor {
                   return true;
               } else if(option.equalsIgnoreCase(ExperienceBarManager.XPBarSettingTarget.DISABLE.toString())) {
                   mmoPlayer.getExperienceBarManager().disableAllBars();
+                  NotificationManager.sendPlayerInformationChatOnlyPrefixed(mmoPlayer.getPlayer(), "Commands.XPBar.DisableAll"); // Jsinco
                   return true;
               } else {
                   return false;

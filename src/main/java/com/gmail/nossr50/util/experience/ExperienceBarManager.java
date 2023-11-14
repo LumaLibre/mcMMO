@@ -97,8 +97,8 @@ public class ExperienceBarManager {
         for(PrimarySkillType primarySkillType : PrimarySkillType.values()) {
             xpBarSettingToggle(XPBarSettingTarget.HIDE, primarySkillType);
         }
-
-        NotificationManager.sendPlayerInformationChatOnlyPrefixed(mcMMOPlayer.getPlayer(), "Commands.XPBar.DisableAll");
+        // Jsinco
+        //NotificationManager.sendPlayerInformationChatOnlyPrefixed(mcMMOPlayer.getPlayer(), "Commands.XPBar.DisableAll");
     }
 
     public void xpBarSettingToggle(@NotNull XPBarSettingTarget settingTarget, @Nullable PrimarySkillType skillType) {
@@ -129,8 +129,8 @@ public class ExperienceBarManager {
                 resetBarSettings();
                 break;
         }
-
-        informPlayer(settingTarget, skillType);
+        // Jsinco
+        //informPlayer(settingTarget, skillType);
     }
 
     private void resetBarSettings() {

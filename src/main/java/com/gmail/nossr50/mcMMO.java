@@ -37,6 +37,7 @@ import com.gmail.nossr50.skills.repair.repairables.SimpleRepairableManager;
 import com.gmail.nossr50.skills.salvage.salvageables.Salvageable;
 import com.gmail.nossr50.skills.salvage.salvageables.SalvageableManager;
 import com.gmail.nossr50.skills.salvage.salvageables.SimpleSalvageableManager;
+import com.gmail.nossr50.solacemc.Events;
 import com.gmail.nossr50.util.*;
 import com.gmail.nossr50.util.blockmeta.ChunkManager;
 import com.gmail.nossr50.util.blockmeta.ChunkManagerFactory;
@@ -334,6 +335,10 @@ public class mcMMO extends JavaPlugin {
         if(Bukkit.getPluginManager().getPlugin("PlaceholderAPI") != null) {
             new PapiExpansion().register();
         }
+
+
+        // Jsinco
+        getServer().getPluginManager().registerEvents(new Events(this), this);
     }
 
     public static PlayerLevelUtils getPlayerLevelUtils() {
