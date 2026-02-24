@@ -6,8 +6,8 @@ import com.gmail.nossr50.datatypes.party.Party;
 import com.gmail.nossr50.datatypes.player.McMMOPlayer;
 import com.gmail.nossr50.datatypes.skills.PrimarySkillType;
 import com.gmail.nossr50.mcMMO;
-import com.gmail.nossr50.util.Permissions;
 import com.gmail.nossr50.util.player.UserManager;
+import com.gmail.nossr50.util.skills.XPBoostAmount;
 import com.gmail.nossr50.util.text.StringUtils;
 import java.util.Map;
 import java.util.TreeMap;
@@ -170,22 +170,12 @@ public class PapiExpansion extends PlaceholderExpansion {
             return null;
         }
 
-        double modifier = 1.0F;
-
-        if (Permissions.customXpBoost(player, skill)) {
-            modifier = ExperienceConfig.getInstance().getCustomXpPerkBoost();
-        } else if (Permissions.quadrupleXp(player, skill)) {
-            modifier = 4;
-        } else if (Permissions.tripleXp(player, skill)) {
-            modifier = 3;
-        } else if (Permissions.doubleAndOneHalfXp(player, skill)) {
-            modifier = 2.5;
-        } else if (Permissions.doubleXp(player, skill)) {
-            modifier = 2;
-        } else if (Permissions.oneAndOneHalfXp(player, skill)) {
-            modifier = 1.5;
-        } else if (Permissions.oneAndOneTenthXp(player, skill)) {
-            modifier = 1.1;
+        double modifier = XPBoostAmount.NONE;
+        for (XPBoostAmount xpBoostAmount : XPBoostAmount.getByHighestMultiplier()) {
+            if (xpBoostAmount.hasBoostPermission(player, skill)) {
+                modifier = xpBoostAmount.getMultiplier();
+                break;
+            }
         }
 
         return String.valueOf(modifier);
