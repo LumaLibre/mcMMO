@@ -147,12 +147,14 @@ public class BlockListener implements Listener {
                         }
 
                         int amountToAddFromBonus = bonusDropMeta.asInt();
-                        final McMMOModifyBlockDropItemEvent modifyBlockDropItemEvent
+                        final McMMOModifyBlockDropItemEvent modifyDropEvent
                                 = new McMMOModifyBlockDropItemEvent(event, item, amountToAddFromBonus);
-                        plugin.getServer().getPluginManager().callEvent(modifyBlockDropItemEvent);
-                        if (!modifyBlockDropItemEvent.isCancelled()
-                                && modifyBlockDropItemEvent.getModifiedItemStackQuantity() > originalAmount) {
-                            eventItemStack.setAmount(modifyBlockDropItemEvent.getModifiedItemStackQuantity());
+                        plugin.getServer().getPluginManager().callEvent(modifyDropEvent);
+                        if (!modifyDropEvent.isCancelled()
+                                && modifyDropEvent.getModifiedItemStackQuantity() > originalAmount) {
+                            eventItemStack.setAmount(
+                                    Math.min(modifyDropEvent.getModifiedItemStackQuantity(),
+                                            item.getItemStack().getMaxStackSize()));
                         }
                     }
                 }
@@ -240,11 +242,16 @@ public class BlockListener implements Listener {
             return;
         }
 
-        BlockState blockState = event.getNewState();
+        final BlockState newState = event.getNewState();
+
+        if (!newState.isPlaced()) {
+            // not backed by a real block
+            return;
+        }
 
         if (ExperienceConfig.getInstance().isSnowExploitPrevented() && BlockUtils.shouldBeWatched(
-                blockState)) {
-            Block block = blockState.getBlock();
+                newState)) {
+            final Block block = newState.getBlock();
 
             if (BlockUtils.isWithinWorldBounds(block)) {
                 BlockUtils.setUnnaturalBlock(block);
@@ -257,7 +264,7 @@ public class BlockListener implements Listener {
      */
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onBlockFormEvent(BlockFormEvent event) {
-        World world = event.getBlock().getWorld();
+        final World world = event.getBlock().getWorld();
 
         /* WORLD BLACKLIST CHECK */
         if (WorldBlacklist.isWorldBlacklisted(world)) {
@@ -265,12 +272,16 @@ public class BlockListener implements Listener {
         }
 
         if (ExperienceConfig.getInstance().preventStoneLavaFarming()) {
-            BlockState newState = event.getNewState();
+            final BlockState newState = event.getNewState();
+            if (!newState.isPlaced()) {
+                // not backed by a real block
+                return;
+            }
 
             if (newState.getType() != Material.OBSIDIAN
                     && ExperienceConfig.getInstance().doesBlockGiveSkillXP(
                     PrimarySkillType.MINING, newState.getType())) {
-                Block block = newState.getBlock();
+                final Block block = newState.getBlock();
                 if (BlockUtils.isWithinWorldBounds(block)) {
                     BlockUtils.setUnnaturalBlock(block);
                 }
