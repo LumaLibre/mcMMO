@@ -46,7 +46,6 @@ public class AlchemyBrewTask extends CancellableRunnable {
         }
 
         this.brewingStand = brewingStand;
-        this.mmoPlayer = mmoPlayer;
 
         brewSpeed = DEFAULT_BREW_SPEED;
         brewTimer = DEFAULT_BREW_TICKS;
