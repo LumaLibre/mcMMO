@@ -10,14 +10,11 @@ import com.gmail.nossr50.datatypes.skills.subskills.taming.CallOfTheWildType;
 import com.gmail.nossr50.events.McMMOReplaceVanillaTreasureEvent;
 import com.gmail.nossr50.locale.LocaleLoader;
 import com.gmail.nossr50.mcMMO;
-import com.gmail.nossr50.runnables.MobHealthDisplayUpdaterTask;
 import com.gmail.nossr50.runnables.player.PlayerProfileLoadingTask;
 import com.gmail.nossr50.skills.fishing.FishingManager;
 import com.gmail.nossr50.skills.herbalism.HerbalismManager;
 import com.gmail.nossr50.skills.mining.MiningManager;
-import com.gmail.nossr50.skills.repair.Repair;
 import com.gmail.nossr50.skills.repair.RepairManager;
-import com.gmail.nossr50.skills.salvage.Salvage;
 import com.gmail.nossr50.skills.salvage.SalvageManager;
 import com.gmail.nossr50.skills.taming.TamingManager;
 import com.gmail.nossr50.util.BlockUtils;
@@ -37,6 +34,9 @@ import com.gmail.nossr50.util.skills.SkillUtils;
 import com.gmail.nossr50.worldguard.WorldGuardManager;
 import com.gmail.nossr50.worldguard.WorldGuardUtils;
 import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Material;
@@ -79,6 +79,7 @@ import org.bukkit.inventory.ItemStack;
 
 public class PlayerListener implements Listener {
     private final mcMMO plugin;
+    private final Map<UUID, EquipmentSlot> fishingHandsByPlayer = new ConcurrentHashMap<>();
 
     public PlayerListener(final mcMMO plugin) {
         this.plugin = plugin;
@@ -181,7 +182,7 @@ public class PlayerListener implements Listener {
         }
 
         // temporarily clear the mob's name
-        new MobHealthDisplayUpdaterTask(attacker).run();
+        MobHealthbarUtils.restoreNameFromSnapshot(attacker);
 
         // set the name back
         mcMMO.p.getFoliaLib().getScheduler().runAtEntityLater(attacker,
@@ -377,12 +378,13 @@ public class PlayerListener implements Listener {
 
             case IN_GROUND:
                 Block block = player.getTargetBlock(null, 100);
+                EquipmentSlot fishingHand = getFishingHandForEvent(player, event.getHand());
 
                 if (fishingManager.canIceFish(block)) {
 
                     cancelFishingEventAndDropXp(event, player);
 
-                    fishingManager.iceFishing(event.getHook(), block);
+                    fishingManager.iceFishing(event.getHook(), block, fishingHand);
                 }
                 return;
 
@@ -434,13 +436,7 @@ public class PlayerListener implements Listener {
         Entity caught = event.getCaught();
         FishingManager fishingManager = UserManager.getPlayer(player).getFishingManager();
 
-        //Track the hook
         if (ExperienceConfig.getInstance().isFishingExploitingPrevented()) {
-            if (event.getHook().getMetadata(MetadataConstants.METADATA_KEY_FISH_HOOK_REF).size()
-                    == 0) {
-                fishingManager.setFishHookReference(event.getHook());
-            }
-
             //Spam Fishing
             if (event.getState() == PlayerFishEvent.State.CAUGHT_FISH
                     && fishingManager.isFishingTooOften()) {
@@ -456,34 +452,21 @@ public class PlayerListener implements Listener {
 
         switch (event.getState()) {
             case FISHING:
+                EquipmentSlot fishingHand = getFishingHandForEvent(player, event.getHand());
+
                 if (fishingManager.canMasterAngler()) {
-                    int lureLevel = 0;
-                    ItemStack inHand = player.getInventory().getItemInMainHand();
+                    ItemStack inHand = getItemInEventHand(player, fishingHand);
 
-                    //Grab lure level
-                    if (inHand != null
-                            && inHand.getItemMeta() != null
-                            && inHand.getType().getKey().getKey().equalsIgnoreCase("fishing_rod")) {
-                        if (inHand.getItemMeta().hasEnchants()) {
-                            for (Enchantment enchantment : inHand.getItemMeta().getEnchants()
-                                    .keySet()) {
-                                if (enchantment.toString().toLowerCase().contains("lure")) {
-                                    lureLevel = inHand.getEnchantmentLevel(enchantment);
-                                }
-                            }
-                        }
-
-                        // Prevent any potential odd behavior by only processing if no offhand fishing rod is present
-                        if (!player.getInventory().getItemInOffHand().getType().getKey().getKey()
-                                .equalsIgnoreCase("fishing_rod")) {
-                            // In case of offhand fishing rod, don't process anything
-                            fishingManager.masterAngler(event.getHook(), lureLevel);
-                            fishingManager.setFishingTarget();
-                        }
+                    if (isFishingRod(inHand)) {
+                        int lureLevel = inHand.getEnchantmentLevel(Enchantment.LURE);
+                        fishingManager.masterAngler(event.getHook(), lureLevel);
+                        fishingManager.setFishingTarget();
                     }
                 }
                 return;
             case CAUGHT_FISH:
+                EquipmentSlot caughtFishingHand = getFishingHandForEvent(player, event.getHand());
+
                 if (caught instanceof Item caughtItem) {
                     if (ExperienceConfig.getInstance().isFishingExploitingPrevented()) {
 
@@ -500,7 +483,7 @@ public class PlayerListener implements Listener {
                         }
                     }
 
-                    fishingManager.processFishing(caughtItem);
+                    fishingManager.processFishing(caughtItem, caughtFishingHand);
                     fishingManager.setFishingTarget();
                 }
                 return;
@@ -512,6 +495,31 @@ public class PlayerListener implements Listener {
                 return;
             default:
         }
+    }
+
+    static ItemStack getItemInEventHand(Player player, EquipmentSlot hand) {
+        if (hand == EquipmentSlot.HAND) {
+            return player.getInventory().getItemInMainHand();
+        }
+
+        if (hand == EquipmentSlot.OFF_HAND) {
+            return player.getInventory().getItemInOffHand();
+        }
+
+        return null;
+    }
+
+    static boolean isFishingRod(ItemStack itemStack) {
+        return itemStack != null && itemStack.getType() == Material.FISHING_ROD;
+    }
+
+    private EquipmentSlot getFishingHandForEvent(Player player, EquipmentSlot eventHand) {
+        if (eventHand == EquipmentSlot.HAND || eventHand == EquipmentSlot.OFF_HAND) {
+            fishingHandsByPlayer.put(player.getUniqueId(), eventHand);
+            return eventHand;
+        }
+
+        return fishingHandsByPlayer.get(player.getUniqueId());
     }
 
     /**
@@ -700,7 +708,8 @@ public class PlayerListener implements Listener {
         Block clickedBlock = event.getClickedBlock();
         Material clickedBlockType = clickedBlock.getType();
         //The blacklist contains interactable blocks so its a convenient filter
-        if (clickedBlockType == Repair.anvilMaterial || clickedBlockType == Salvage.anvilMaterial) {
+        if (clickedBlockType == mcMMO.p.getGeneralConfig().getRepairAnvilMaterial()
+                || clickedBlockType == mcMMO.p.getGeneralConfig().getSalvageAnvilMaterial()) {
             event.setUseItemInHand(Event.Result.ALLOW);
 
             if (!event.getPlayer().isSneaking() && mcMMO.getMaterialMapStore()
@@ -730,7 +739,7 @@ public class PlayerListener implements Listener {
                 if (!mcMMO.p.getGeneralConfig().getAbilitiesOnlyActivateWhenSneaking()
                         || player.isSneaking()) {
                     /* REPAIR CHECKS */
-                    if (type == Repair.anvilMaterial
+                    if (type == mcMMO.p.getGeneralConfig().getRepairAnvilMaterial()
                             && mcMMO.p.getSkillTools()
                             .doesPlayerHaveSkillPermission(player, PrimarySkillType.REPAIR)
                             && mcMMO.getRepairableManager().isRepairable(heldItem)
@@ -744,7 +753,7 @@ public class PlayerListener implements Listener {
                         }
                     }
                     /* SALVAGE CHECKS */
-                    else if (type == Salvage.anvilMaterial
+                    else if (type == mcMMO.p.getGeneralConfig().getSalvageAnvilMaterial()
                             && mcMMO.p.getSkillTools()
                             .doesPlayerHaveSkillPermission(player, PrimarySkillType.SALVAGE)
                             && RankUtils.hasUnlockedSubskill(player,
@@ -780,7 +789,7 @@ public class PlayerListener implements Listener {
                 if (!mcMMO.p.getGeneralConfig().getAbilitiesOnlyActivateWhenSneaking()
                         || player.isSneaking()) {
                     /* REPAIR CHECKS */
-                    if (type == Repair.anvilMaterial && mcMMO.p.getSkillTools()
+                    if (type == mcMMO.p.getGeneralConfig().getRepairAnvilMaterial() && mcMMO.p.getSkillTools()
                             .doesPlayerHaveSkillPermission(player, PrimarySkillType.REPAIR)
                             && mcMMO.getRepairableManager().isRepairable(heldItem)) {
                         RepairManager repairManager = mmoPlayer.getRepairManager();
@@ -793,7 +802,7 @@ public class PlayerListener implements Listener {
                         }
                     }
                     /* SALVAGE CHECKS */
-                    else if (type == Salvage.anvilMaterial && mcMMO.p.getSkillTools()
+                    else if (type == mcMMO.p.getGeneralConfig().getSalvageAnvilMaterial() && mcMMO.p.getSkillTools()
                             .doesPlayerHaveSkillPermission(player, PrimarySkillType.SALVAGE)
                             && mcMMO.getSalvageableManager().isSalvageable(heldItem)) {
                         SalvageManager salvageManager = mmoPlayer.getSalvageManager();

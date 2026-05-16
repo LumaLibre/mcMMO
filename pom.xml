@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>com.gmail.nossr50.mcMMO</groupId>
     <artifactId>mcMMO</artifactId>
-    <version>2.2.050-SNAPSHOT-LUMA</version>
+    <version>2.2.053-SNAPSHOT-LUMA</version>
     <name>mcMMO</name>
     <url>https://github.com/mcMMO-Dev/mcMMO</url>
     <scm>
@@ -15,6 +15,7 @@
     </scm>
 
     <properties>
+<!--        <spigot.version>26.1.1-R0.1-SNAPSHOT</spigot.version>-->
         <spigot.version>1.20.5-R0.1-SNAPSHOT</spigot.version>
 <!--        <spigot.version>1.21.11-R0.1-SNAPSHOT</spigot.version>-->
         <kyori.adventure.version>4.23.0</kyori.adventure.version>
@@ -484,7 +485,7 @@
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-core</artifactId>
-            <version>2.25.2</version>
+            <version>2.25.4</version>
             <scope>test</scope>
         </dependency>
         <!-- Log4j API -->
@@ -572,4 +573,26 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <profiles>
+        <profile>
+            <id>skip-docker-tests</id>
+            <activation>
+                <property>
+                    <name>skipDockerTests</name>
+                    <value>true</value>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <excludedGroups>skip,docker</excludedGroups>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

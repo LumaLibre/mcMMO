@@ -444,15 +444,23 @@ public class HerbalismManager extends SkillManager {
         return false;
     }
 
+    public boolean canUseVerdantBounty() {
+        return Permissions.canUseSubSkill(getPlayer(), SubSkillType.HERBALISM_VERDANT_BOUNTY);
+    }
+
     /**
      * Mark a block for bonus drops.
+     * <p>
+     * Triple drops are awarded when Green Terra is active, or when the Verdant Bounty RNG check
+     * succeeds. Otherwise, double drops are awarded.
      *
      * @param block the block to mark
      */
     public void markForBonusDrops(Block block) {
-        //Add metadata to mark this block for double or triple drops
-        boolean awardTriple = mmoPlayer.getAbilityMode(SuperAbilityType.GREEN_TERRA);
-        BlockUtils.markDropsAsBonus(block, awardTriple);
+        final boolean triple = mmoPlayer.getAbilityMode(SuperAbilityType.GREEN_TERRA)
+                || (canUseVerdantBounty() && ProbabilityUtil.isSkillRNGSuccessful(
+                        SubSkillType.HERBALISM_VERDANT_BOUNTY, mmoPlayer));
+        BlockUtils.markDropsAsBonus(block, triple);
     }
 
     /**
@@ -808,8 +816,10 @@ public class HerbalismManager extends SkillManager {
             return false;
         }
 
-        playerInventory.removeItem(new ItemStack(Material.BROWN_MUSHROOM));
-        playerInventory.removeItem(new ItemStack(Material.RED_MUSHROOM));
+        // Consume mushrooms by material so renamed/custom-meta variants are not skipped by
+        // CraftBukkit's stricter ItemStack similarity matcher.
+        removeItemIncludingOffHand(getPlayer(), Material.BROWN_MUSHROOM, 1);
+        removeItemIncludingOffHand(getPlayer(), Material.RED_MUSHROOM, 1);
 
         if (!ProbabilityUtil.isSkillRNGSuccessful(SubSkillType.HERBALISM_SHROOM_THUMB, mmoPlayer)) {
             NotificationManager.sendPlayerInformation(getPlayer(),
@@ -927,7 +937,6 @@ public class HerbalismManager extends SkillManager {
         //Immature plants will start over at 0
         if (!isAgeableMature(ageable)) {
             startReplantTask(0, blockBreakEvent, blockState, true);
-            blockBreakEvent.setDropItems(false);
             return true;
         }
 
