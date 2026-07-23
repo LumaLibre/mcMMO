@@ -7,22 +7,26 @@ import com.gmail.nossr50.datatypes.skills.SuperAbilityType;
 import com.gmail.nossr50.datatypes.skills.ToolType;
 import com.gmail.nossr50.locale.LocaleLoader;
 import com.gmail.nossr50.mcMMO;
+import com.gmail.nossr50.util.LogUtils;
 import com.gmail.nossr50.util.Permissions;
 import com.gmail.nossr50.util.text.StringUtils;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Tameable;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.VisibleForTesting;
 
 public class SkillTools {
@@ -31,6 +35,10 @@ public class SkillTools {
     // TODO: Java has immutable types now, switch to those
     // TODO: Figure out which ones we don't need, this was copy pasted from a diff branch
     public final @NotNull ImmutableList<String> LOCALIZED_SKILL_NAMES;
+    /**
+     * @deprecated No remaining callers; scheduled for removal.
+     */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public final @NotNull ImmutableList<String> FORMATTED_SUBSKILL_NAMES;
     public final @NotNull ImmutableSet<String> EXACT_SUBSKILL_NAMES;
     public final @NotNull ImmutableList<PrimarySkillType> CHILD_SKILLS;
@@ -171,6 +179,9 @@ public class SkillTools {
                 tempPrimaryChildMap.get(parentSkill).add(subSkillType);
             }
         }
+
+        // Freeze the sets so getSubSkills never hands out mutable internals
+        tempPrimaryChildMap.replaceAll((skill, subSkills) -> ImmutableSet.copyOf(subSkills));
 
         return ImmutableMap.copyOf(tempPrimaryChildMap);
     }
@@ -331,8 +342,11 @@ public class SkillTools {
     private @NotNull ArrayList<String> buildLocalizedPrimarySkillNames() {
         ArrayList<String> localizedSkillNameList = new ArrayList<>();
 
+        // Lowercased for tab completion, where suggestions read like the other completion
+        // keywords; skill matching is case-insensitive so completed names still resolve
         for (PrimarySkillType primarySkillType : PrimarySkillType.values()) {
-            localizedSkillNameList.add(getLocalizedSkillName(primarySkillType));
+            localizedSkillNameList.add(getHeaderBannerSkillName(primarySkillType)
+                    .toLowerCase(Locale.ENGLISH));
         }
 
         Collections.sort(localizedSkillNameList);
@@ -351,11 +365,11 @@ public class SkillTools {
      * @param skillName target skill name
      * @return the matching PrimarySkillType if one is found, otherwise null
      */
-    public PrimarySkillType matchSkill(String skillName) {
+    @Nullable
+    public PrimarySkillType matchSkill(@NotNull String skillName) {
         if (!pluginRef.getGeneralConfig().getLocale().equalsIgnoreCase("en_US")) {
             for (PrimarySkillType type : PrimarySkillType.values()) {
-                String localized = LocaleLoader.getString(
-                        StringUtils.getCapitalized(type.name()) + ".SkillName");
+                String localized = getHeaderBannerSkillName(type);
                 if (skillName.equalsIgnoreCase(localized)) {
                     return type;
                 }
@@ -369,11 +383,36 @@ public class SkillTools {
         }
 
         if (!skillName.equalsIgnoreCase("all")) {
-            pluginRef.getLogger()
-                    .warning("Invalid mcMMO skill (" + skillName + ")"); // TODO: Localize
+            // Debug rather than warning: other plugins probe arbitrary names through the API
+            // (ExperienceAPI.isValidSkillType and friends), which must stay quiet on console
+            LogUtils.debug(pluginRef.getLogger(), "Invalid mcMMO skill (" + skillName + ")");
         }
 
         return null;
+    }
+
+    /**
+     * Matches a collection of skill name strings to skills.
+     * This is NOT case-sensitive.
+     * <p>
+     * First it checks the locale file and tries to match by the localized name of the skill.
+     * Then if nothing is found it checks against the hard coded "name" of the skill,
+     * which is just its name in English.
+     *
+     * @param skills target skill names
+     * @return the set of matching PrimarySkillTypes, skipping names that don't match
+     */
+    @NotNull
+    public Set<PrimarySkillType> matchSkills(@NotNull Collection<String> skills) {
+        final Set<PrimarySkillType> matchingSkills = new HashSet<>();
+        for (String skillName : skills) {
+            final PrimarySkillType primarySkillType = matchSkill(skillName);
+            if (primarySkillType != null) {
+                matchingSkills.add(primarySkillType);
+            }
+        }
+
+        return matchingSkills;
     }
 
     /**
@@ -448,12 +487,30 @@ public class SkillTools {
     }
 
     /**
-     * Get the localized name for a {@link PrimarySkillType}
+     * The localized skill name meant for messages sent to players, from the locale's
+     * {@code Overhaul.Name} keys. In the English locales this is nicely capitalized (like
+     * "Mining"), but other locales may style it differently. For the stylized headers use
+     * {@link #getHeaderBannerSkillName(PrimarySkillType)} instead.
      *
      * @param primarySkillType target {@link PrimarySkillType}
-     * @return the localized name for a {@link PrimarySkillType}
+     * @return the localized skill name for messages
      */
     public String getLocalizedSkillName(PrimarySkillType primarySkillType) {
+        return LocaleLoader.getString(
+                "Overhaul.Name." + StringUtils.getCapitalized(primarySkillType.toString()));
+    }
+
+    /**
+     * The localized skill name meant for the stylized headers (skill command screens, guide
+     * headers, scoreboards), from the locale's {@code <Skill>.SkillName} keys. In the English
+     * locales this is FULL CAPS (like "MINING"), but it can differ by locale. This value is
+     * also the matching surface for localized skill commands and tab completion, so renaming a
+     * skill through these keys renames its command too.
+     *
+     * @param primarySkillType target {@link PrimarySkillType}
+     * @return the localized skill name for headers and skill command matching
+     */
+    public String getHeaderBannerSkillName(PrimarySkillType primarySkillType) {
         return LocaleLoader.getString(
                 StringUtils.getCapitalized(primarySkillType.toString()) + ".SkillName");
     }

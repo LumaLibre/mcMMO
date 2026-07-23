@@ -23,9 +23,9 @@ import com.gmail.nossr50.skills.swords.SwordsManager;
 import com.gmail.nossr50.skills.taming.TamingManager;
 import com.gmail.nossr50.skills.tridents.TridentsManager;
 import com.gmail.nossr50.skills.unarmed.UnarmedManager;
+import com.gmail.nossr50.util.AttributeMapper;
 import com.gmail.nossr50.util.ItemUtils;
 import com.gmail.nossr50.util.MetadataConstants;
-import com.gmail.nossr50.util.MobHealthbarUtils;
 import com.gmail.nossr50.util.Misc;
 import com.gmail.nossr50.util.MobHealthbarUtils;
 import com.gmail.nossr50.util.Permissions;
@@ -56,6 +56,7 @@ import org.bukkit.potion.PotionEffectType;
 import org.bukkit.projectiles.ProjectileSource;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jetbrains.annotations.VisibleForTesting;
 
 public final class CombatUtils {
 
@@ -104,6 +105,57 @@ public final class CombatUtils {
     private CombatUtils() {
     }
 
+    /**
+     * Computes the attack strength scale for a melee hit by back-deriving it from the
+     * raw event damage ({@link org.bukkit.event.entity.EntityDamageEvent#getDamage()})
+     * and the player's current {@code GENERIC_ATTACK_DAMAGE} attribute value.
+     *
+     * <p>This is necessary because Paper 26.1.2+ (PR #13856) resets the attack strength ticker
+     * <em>before</em> {@link EntityDamageByEntityEvent} fires, which makes
+     * {@link Player#getAttackCooldown()} return {@code ~0} during the event instead of the
+     * actual charge level at the time of the hit.
+     *
+     * <p>Vanilla sets {@code BASE = attribute.getValue() * baseDamageScaleFactor(scale)}, where
+     * {@code baseDamageScaleFactor} reaches {@code 1.0} at full charge. Dividing BASE by the
+     * attribute value and clamping to {@code [0.0, 1.0]} therefore recovers a charge-proportional
+     * scale that is exactly {@code 1.0} for a full-charge hit — the only case that previously broke.
+     *
+     * <p>Sweep attacks ({@link DamageCause#ENTITY_SWEEP_ATTACK}) always occur at full charge but
+     * have a BASE that does not follow the same formula, so they always return {@code 1.0}.
+     *
+     * @param player the attacking player
+     * @param event  the damage event, read before any mcMMO modifications are applied
+     * @return a scale in {@code [0.0, 1.0]} representing the committed attack strength,
+     *         or {@code 1.0} when the {@code useAttackCooldown} config option is disabled
+     */
+    static double computeAttackStrengthScale(@NotNull Player player,
+            @NotNull EntityDamageByEntityEvent event) {
+        if (!mcMMO.p.getAdvancedConfig().useAttackCooldown()) {
+            return 1.0;
+        }
+        // Sweep attacks only occur at full charge; their BASE reflects the sweep damage formula
+        // rather than weaponDamage * scale, so back-derivation would give the wrong value.
+        if (event.getCause() == DamageCause.ENTITY_SWEEP_ATTACK) {
+            return 1.0;
+        }
+        final AttributeInstance attackDamageAttribute =
+                player.getAttribute(AttributeMapper.MAPPED_GENERIC_ATTACK_DAMAGE);
+        if (attackDamageAttribute == null) {
+            return 1.0;
+        }
+        final double maxBaseDamage = attackDamageAttribute.getValue();
+        if (maxBaseDamage <= 0.0) {
+            return 1.0;
+        }
+        // At full charge vanilla sets raw event damage == attribute.getValue(), scale = 1.0.
+        // At lower charge the raw damage is smaller, giving a proportionally smaller scale.
+        // The clamp handles crits and any edge case that would push the ratio above 1.0.
+        // event.getDamage() returns the raw (BASE) damage; getDamage(DamageModifier.BASE) is
+        // the deprecated equivalent and must not be used.
+        final double scale = event.getDamage() / maxBaseDamage;
+        return Math.max(0.0, Math.min(1.0, scale));
+    }
+
     @Deprecated(forRemoval = true, since = "2.2.039")
     public static boolean isDamageLikelyFromNormalCombat(@NotNull DamageCause damageCause) {
         return switch (damageCause) {
@@ -118,7 +170,7 @@ public final class CombatUtils {
     }
 
     private static void processSwordCombat(@NotNull LivingEntity target, @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -139,38 +191,51 @@ public final class CombatUtils {
 
         //Add Stab Damage
         if (swordsManager.canUseStab()) {
-            boostedDamage += (swordsManager.getStabDamage() * mmoPlayer.getAttackStrength());
+            boostedDamage += (swordsManager.getStabDamage() * attackStrengthScale);
         }
 
         if (swordsManager.canUseSerratedStrike()) {
-            swordsManager.serratedStrikes(target, event.getDamage());
+            swordsManager.serratedStrikes(target, event.getDamage(), attackStrengthScale);
         }
 
         if (canUseLimitBreak(player, target, SubSkillType.SWORDS_SWORDS_LIMIT_BREAK)) {
             boostedDamage += (getLimitBreakDamage
                     (player, target, SubSkillType.SWORDS_SWORDS_LIMIT_BREAK)
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
         event.setDamage(boostedDamage);
 
         if (target.getHealth() - event.getFinalDamage() > 0) {
-            swordsManager.processRupture(target);
+            swordsManager.processRupture(target, attackStrengthScale);
         }
 
         processCombatXP(mmoPlayer, target, PrimarySkillType.SWORDS);
 
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
-    private static void printFinalDamageDebug(@NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event,
-            @NotNull McMMOPlayer mmoPlayer,
-            @Nullable String @Nullable ... extraInfoLines) {
+    private static void printFinalDamageDebug(@NotNull Player player, @NotNull EntityDamageByEntityEvent event,
+            @NotNull McMMOPlayer mmoPlayer, @Nullable String @Nullable ... extraInfoLines) {
         if (mmoPlayer.isDebugMode()) {
             player.sendMessage(
                     "Final Damage value after mcMMO modifiers: " + event.getFinalDamage());
-            player.sendMessage("Your current attack strength: " + player.getAttackCooldown());
+            if (extraInfoLines != null) {
+                for (String str : extraInfoLines) {
+                    if (str != null) {
+                        player.sendMessage(str);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void printFinalDamageDebug(@NotNull Player player, @NotNull EntityDamageByEntityEvent event,
+            @NotNull McMMOPlayer mmoPlayer, double attackStrengthScale, @Nullable String @Nullable ... extraInfoLines) {
+        if (mmoPlayer.isDebugMode()) {
+            player.sendMessage(
+                    "Final Damage value after mcMMO modifiers: " + event.getFinalDamage());
+            player.sendMessage("Attack strength scale (derived from BASE damage): " + attackStrengthScale);
             if (extraInfoLines != null) {
                 for (String str : extraInfoLines) {
                     if (str != null) {
@@ -182,7 +247,8 @@ public final class CombatUtils {
     }
 
     private static void processTridentCombatMelee(@NotNull LivingEntity target,
-            @NotNull Player player, @NotNull EntityDamageByEntityEvent event) {
+            @NotNull Player player, @NotNull EntityDamageByEntityEvent event,
+            double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -203,25 +269,23 @@ public final class CombatUtils {
 //        }
 
         if (SkillUtils.canUseSubskill(player, SubSkillType.TRIDENTS_IMPALE)) {
-            boostedDamage += (tridentsManager.impaleDamageBonus() * mmoPlayer.getAttackStrength());
+            boostedDamage += (tridentsManager.impaleDamageBonus() * attackStrengthScale);
         }
 
         if (canUseLimitBreak(player, target, SubSkillType.TRIDENTS_TRIDENTS_LIMIT_BREAK)) {
             boostedDamage += (getLimitBreakDamage(
                     player, target, SubSkillType.TRIDENTS_TRIDENTS_LIMIT_BREAK)
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
         event.setDamage(boostedDamage);
         processCombatXP(mmoPlayer, target, PrimarySkillType.TRIDENTS);
 
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
-    private static void processTridentCombatRanged(@NotNull Trident trident,
-            @NotNull LivingEntity target,
-            @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+    private static void processTridentCombatRanged(@NotNull Trident trident, @NotNull LivingEntity target,
+            @NotNull Player player, @NotNull EntityDamageByEntityEvent event) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -293,9 +357,8 @@ public final class CombatUtils {
         delayArrowMetaCleanup(arrow);
     }
 
-    private static void processMacesCombat(@NotNull LivingEntity target,
-            @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+    private static void processMacesCombat(@NotNull LivingEntity target, @NotNull Player player,
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -315,26 +378,25 @@ public final class CombatUtils {
         if (canUseLimitBreak(player, target, SubSkillType.MACES_MACES_LIMIT_BREAK)) {
             boostedDamage += (getLimitBreakDamage(
                     player, target, SubSkillType.MACES_MACES_LIMIT_BREAK)
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
         // Apply Crush DMG
-        boostedDamage += (macesManager.getCrushDamage() * mmoPlayer.getAttackStrength());
+        boostedDamage += (macesManager.getCrushDamage() * attackStrengthScale);
 
         event.setDamage(boostedDamage);
 
         // Apply Cripple
         if (target.getHealth() - event.getFinalDamage() > 0) {
-            macesManager.processCripple(target);
+            macesManager.processCripple(target, attackStrengthScale);
         }
 
         processCombatXP(mmoPlayer, target, PrimarySkillType.MACES);
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
-    private static void processSpearsCombat(@NotNull LivingEntity target,
-            @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+    private static void processSpearsCombat(@NotNull LivingEntity target, @NotNull Player player,
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -352,28 +414,28 @@ public final class CombatUtils {
 
         if (canUseSubSkill(player, SubSkillType.SPEARS_SPEAR_MASTERY)) {
             boostedDamage += spearsManager.getSpearMasteryBonusDamage()
-                    * mmoPlayer.getAttackStrength();
+                    * attackStrengthScale;
         }
 
         // Apply Limit Break DMG
         if (canUseLimitBreak(player, target, SubSkillType.SPEARS_SPEARS_LIMIT_BREAK)) {
             boostedDamage += (getLimitBreakDamage(
                     player, target, SubSkillType.SPEARS_SPEARS_LIMIT_BREAK)
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
 
         event.setDamage(boostedDamage);
 
         // Apply any non-damage effects here
-        spearsManager.potentiallyApplyMomentum();
+        spearsManager.potentiallyApplyMomentum(attackStrengthScale);
 
         processCombatXP(mmoPlayer, target, PrimarySkillType.SPEARS);
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
     private static void processAxeCombat(@NotNull LivingEntity target, @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -394,38 +456,39 @@ public final class CombatUtils {
         }
 
         if (axesManager.canUseAxeMastery()) {
-            boostedDamage += axesManager.axeMastery() * mmoPlayer.getAttackStrength();
+            boostedDamage += axesManager.axeMastery() * attackStrengthScale;
         }
 
         if (axesManager.canImpact(target)) {
-            axesManager.impactCheck(target);
+            axesManager.impactCheck(target, attackStrengthScale);
         } else if (axesManager.canGreaterImpact(target)) {
-            boostedDamage += axesManager.greaterImpact(target) * mmoPlayer.getAttackStrength();
+            boostedDamage += axesManager.greaterImpact(target, attackStrengthScale)
+                    * attackStrengthScale;
         }
 
         if (axesManager.canUseSkullSplitter(target)) {
-            axesManager.skullSplitterCheck(target, event.getDamage());
+            axesManager.skullSplitterCheck(target, event.getDamage(), attackStrengthScale);
         }
 
         if (axesManager.canCriticalHit(target)) {
-            boostedDamage += (axesManager.criticalHit(target, boostedDamage)
-                    * mmoPlayer.getAttackStrength());
+            boostedDamage += (axesManager.criticalHit(target, boostedDamage, attackStrengthScale)
+                    * attackStrengthScale);
         }
 
         if (canUseLimitBreak(player, target, SubSkillType.AXES_AXES_LIMIT_BREAK)) {
             boostedDamage += (
                     getLimitBreakDamage(player, target, SubSkillType.AXES_AXES_LIMIT_BREAK)
-                            * mmoPlayer.getAttackStrength());
+                            * attackStrengthScale);
         }
 
         event.setDamage(boostedDamage);
         processCombatXP(mmoPlayer, target, PrimarySkillType.AXES);
 
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
     private static void processUnarmedCombat(@NotNull LivingEntity target, @NotNull Player player,
-            @NotNull EntityDamageByEntityEvent event) {
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
         if (event.getCause() == DamageCause.THORNS) {
             return;
         }
@@ -447,28 +510,28 @@ public final class CombatUtils {
 
         if (unarmedManager.canUseSteelArm()) {
             boostedDamage += (unarmedManager.calculateSteelArmStyleDamage()
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
         if (unarmedManager.canUseBerserk()) {
-            boostedDamage += (unarmedManager.berserkDamage(boostedDamage)
-                    * mmoPlayer.getAttackStrength());
+            boostedDamage += (unarmedManager.berserkDamage(boostedDamage, attackStrengthScale)
+                    * attackStrengthScale);
         }
 
         if (unarmedManager.canDisarm(target)) {
-            unarmedManager.disarmCheck((Player) target);
+            unarmedManager.disarmCheck((Player) target, attackStrengthScale);
         }
 
         if (canUseLimitBreak(player, target, SubSkillType.UNARMED_UNARMED_LIMIT_BREAK)) {
             boostedDamage += (getLimitBreakDamage(
                     player, target, SubSkillType.UNARMED_UNARMED_LIMIT_BREAK)
-                    * mmoPlayer.getAttackStrength());
+                    * attackStrengthScale);
         }
 
         event.setDamage(boostedDamage);
         processCombatXP(mmoPlayer, target, PrimarySkillType.UNARMED);
 
-        printFinalDamageDebug(player, event, mmoPlayer);
+        printFinalDamageDebug(player, event, mmoPlayer, attackStrengthScale);
     }
 
     private static void processTamingCombat(@NotNull LivingEntity target, @Nullable Player master,
@@ -568,8 +631,52 @@ public final class CombatUtils {
      *
      * @param event The event to run the combat checks on.
      */
-    public static void processCombatAttack(@NotNull EntityDamageByEntityEvent event,
-            @NotNull Entity painSourceRoot,
+    /**
+     * Resolves which melee skill claims a hit, preserving the historical predicate order:
+     * the spear damage type wins outright, then the held item is tested as sword, axe,
+     * unarmed, trident, and mace.
+     *
+     * @param isDamageTypeSpear whether the hit carries the spear damage type
+     * @param heldItem the attacker's main hand item
+     * @return the melee skill for the hit, or null when no melee skill claims it
+     */
+    @VisibleForTesting
+    static @Nullable PrimarySkillType resolveMeleeSkill(boolean isDamageTypeSpear,
+            @NotNull ItemStack heldItem) {
+        if (isDamageTypeSpear) {
+            return PrimarySkillType.SPEARS;
+        } else if (ItemUtils.isSword(heldItem)) {
+            return PrimarySkillType.SWORDS;
+        } else if (ItemUtils.isAxe(heldItem)) {
+            return PrimarySkillType.AXES;
+        } else if (ItemUtils.isUnarmed(heldItem)) {
+            return PrimarySkillType.UNARMED;
+        } else if (ItemUtils.isTrident(heldItem)) {
+            return PrimarySkillType.TRIDENTS;
+        } else if (ItemUtils.isMace(heldItem)) {
+            return PrimarySkillType.MACES;
+        }
+
+        return null;
+    }
+
+    private static void processMeleeCombat(@NotNull PrimarySkillType meleeSkill,
+            @NotNull LivingEntity target, @NotNull Player player,
+            @NotNull EntityDamageByEntityEvent event, double attackStrengthScale) {
+        switch (meleeSkill) {
+            case SPEARS -> processSpearsCombat(target, player, event, attackStrengthScale);
+            case SWORDS -> processSwordCombat(target, player, event, attackStrengthScale);
+            case AXES -> processAxeCombat(target, player, event, attackStrengthScale);
+            case UNARMED -> processUnarmedCombat(target, player, event, attackStrengthScale);
+            case TRIDENTS -> processTridentCombatMelee(target, player, event,
+                    attackStrengthScale);
+            case MACES -> processMacesCombat(target, player, event, attackStrengthScale);
+            default -> {
+            }
+        }
+    }
+
+    public static void processCombatAttack(@NotNull EntityDamageByEntityEvent event, @NotNull Entity painSourceRoot,
             @NotNull LivingEntity target) {
         final Entity painSource = event.getDamager();
         final EntityType entityType = painSource.getType();
@@ -637,64 +744,21 @@ public final class CombatUtils {
                 }
             }
 
-            if (isDamageTypeSpear) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.SPEARS, target)) {
-                    return;
-                }
-                if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.SPEARS)) {
-                    processSpearsCombat(target, player, event);
-                }
-            } if (ItemUtils.isSword(heldItem)) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.SWORDS, target)) {
+            // Compute once: the attack strength scale that vanilla actually applied to this hit.
+            // Read before any mcMMO damage modification. Player.getAttackCooldown() is unreliable
+            // here on Paper 26.1.2+ because the ticker is reset before the event fires (PR #13856).
+            final double attackStrengthScale = computeAttackStrengthScale(player, event);
+
+            final PrimarySkillType meleeSkill = resolveMeleeSkill(isDamageTypeSpear, heldItem);
+
+            if (meleeSkill != null) {
+                if (!mcMMO.p.getSkillTools().canCombatSkillsTrigger(meleeSkill, target)) {
                     return;
                 }
 
                 if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.SWORDS)) {
-                    processSwordCombat(target, player, event);
-                }
-            } else if (ItemUtils.isAxe(heldItem)) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.AXES, target)) {
-                    return;
-                }
-
-                if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.AXES)) {
-                    processAxeCombat(target, player, event);
-                }
-            } else if (ItemUtils.isUnarmed(heldItem)) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.UNARMED, target)) {
-                    return;
-                }
-
-                if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.UNARMED)) {
-                    processUnarmedCombat(target, player, event);
-                }
-            } else if (ItemUtils.isTrident(heldItem)) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.TRIDENTS, target)) {
-                    return;
-                }
-
-                if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.TRIDENTS)) {
-                    processTridentCombatMelee(target, player, event);
-                }
-            } else if (ItemUtils.isMace(heldItem)) {
-                if (!mcMMO.p.getSkillTools()
-                        .canCombatSkillsTrigger(PrimarySkillType.MACES, target)) {
-                    return;
-                }
-
-                if (mcMMO.p.getSkillTools()
-                        .doesPlayerHaveSkillPermission(player, PrimarySkillType.MACES)) {
-                    processMacesCombat(target, player, event);
+                        .doesPlayerHaveSkillPermission(player, meleeSkill)) {
+                    processMeleeCombat(meleeSkill, target, player, event, attackStrengthScale);
                 }
             }
         } else if (entityType == EntityType.WOLF) {
@@ -815,8 +879,7 @@ public final class CombatUtils {
      * @param armorQualityLevel Armor quality level
      * @return the RAW damage boost after its been mutated by armor quality
      */
-    public static int getLimitBreakDamageAgainstQuality(@NotNull Player attacker,
-            @NotNull SubSkillType subSkillType,
+    public static int getLimitBreakDamageAgainstQuality(@NotNull Player attacker, @NotNull SubSkillType subSkillType,
             int armorQualityLevel) {
         float rawDamageBoost = RankUtils.getRank(attacker, subSkillType);
 
@@ -907,7 +970,7 @@ public final class CombatUtils {
 
     public static void applyIgnoreDamageMetadata(@NotNull LivingEntity target) {
         target.setMetadata(MetadataConstants.METADATA_KEY_CUSTOM_DAMAGE,
-                MetadataConstants.MCMMO_METADATA_VALUE);
+                MetadataConstants.getMcMMOMetadataValue());
     }
 
     public static boolean hasIgnoreDamageMetadata(@NotNull LivingEntity target) {
@@ -921,20 +984,43 @@ public final class CombatUtils {
      * @param target The defending entity
      * @param damage The initial damage amount
      * @param type The type of skill being used
+     * @deprecated use {@link #applyAbilityAoE(Player, LivingEntity, double, double,
+     * PrimarySkillType)} instead; this overload reads the live attack cooldown, which is
+     * unreliable during damage events on Paper 26.1.2+
      */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public static void applyAbilityAoE(@NotNull Player attacker, @NotNull LivingEntity target,
             double damage, @NotNull PrimarySkillType type) {
+        final McMMOPlayer mmoAttacker = UserManager.getPlayer(attacker);
+        applyAbilityAoE(attacker, target, damage,
+                mmoAttacker != null ? mmoAttacker.getAttackStrength() : 1.0, type);
+    }
+
+    /**
+     * Apply Area-of-Effect ability actions.
+     *
+     * @param attacker The attacking player
+     * @param target The defending entity
+     * @param damage The initial damage amount
+     * @param attackStrengthScale the committed attack strength of the hit, from 0.0 to 1.0
+     * @param type The type of skill being used
+     */
+    public static void applyAbilityAoE(@NotNull Player attacker, @NotNull LivingEntity target,
+            double damage, double attackStrengthScale, @NotNull PrimarySkillType type) {
         int numberOfTargets = getTier(attacker.getInventory()
                 .getItemInMainHand()); // The higher the weapon tier, the more targets you hit
         double damageAmount = Math.max(damage, 1);
+
+        final boolean npcInteractionPrevented =
+                ExperienceConfig.getInstance().isNPCInteractionPrevented();
+        final McMMOPlayer mmoAttacker = UserManager.getPlayer(attacker);
 
         for (Entity entity : target.getNearbyEntities(2.5, 2.5, 2.5)) {
             if (numberOfTargets <= 0) {
                 break;
             }
 
-            if ((ExperienceConfig.getInstance().isNPCInteractionPrevented()
-                    && Misc.isNPCEntityExcludingVillagers(entity))
+            if ((npcInteractionPrevented && Misc.isNPCEntityExcludingVillagers(entity))
                     || !(entity instanceof LivingEntity livingEntity) || !shouldBeAffected(attacker,
                     entity)) {
                 continue;
@@ -948,10 +1034,9 @@ public final class CombatUtils {
                                 "Swords.Combat.SS.Struck");
                     }
 
-                    final McMMOPlayer mmoAttacker = UserManager.getPlayer(attacker);
-
                     if (mmoAttacker != null) {
-                        mmoAttacker.getSwordsManager().processRupture(livingEntity);
+                        mmoAttacker.getSwordsManager()
+                                .processRupture(livingEntity, attackStrengthScale);
                     }
 
                     break;
@@ -993,79 +1078,88 @@ public final class CombatUtils {
      * @param primarySkillType The skill being used
      * @param multiplier final XP result will be multiplied by this
      */
-    public static void processCombatXP(@NotNull McMMOPlayer mmoPlayer,
-            @NotNull LivingEntity target,
-            @NotNull PrimarySkillType primarySkillType,
-            double multiplier) {
-        double baseXP = 0;
-        XPGainReason xpGainReason;
+    public static void processCombatXP(@NotNull McMMOPlayer mmoPlayer, @NotNull LivingEntity target,
+            @NotNull PrimarySkillType primarySkillType, double multiplier) {
+        final double baseXP;
+        final XPGainReason xpGainReason;
 
         if (target instanceof Player defender) {
-            if (defender.equals(mmoPlayer.getPlayer())
-                    || !ExperienceConfig.getInstance().getExperienceGainsPlayerVersusPlayerEnabled()
-                    ||
-                    (mcMMO.p.getPartyConfig().isPartyEnabled()
-                            && mcMMO.p.getPartyManager()
-                            .inSameParty(mmoPlayer.getPlayer(), defender))) {
+            if (isPvpXpIneligible(mmoPlayer, defender)) {
                 return;
             }
 
             xpGainReason = PVP;
-
-            if (defender.isOnline()
-                    && SkillUtils.cooldownExpired(mmoPlayer.getRespawnATS(),
-                    Misc.PLAYER_RESPAWN_COOLDOWN_SECONDS)) {
-                baseXP = 20 * ExperienceConfig.getInstance().getPlayerVersusPlayerXP();
-            }
+            baseXP = calculatePvpBaseXP(mmoPlayer, defender);
         } else {
-            if (target instanceof Animals) {
-                EntityType type = target.getType();
-                baseXP = ExperienceConfig.getInstance().getAnimalsXP(type);
-            } else if (target instanceof Monster) {
-                EntityType type = target.getType();
-                baseXP = ExperienceConfig.getInstance().getCombatXP(type);
-            } else {
-                EntityType type = target.getType();
+            xpGainReason = XPGainReason.PVE;
+            baseXP = calculatePveBaseXP(target);
+        }
 
-                if (ExperienceConfig.getInstance().hasCombatXP(type)) {
-                    if (type == EntityType.IRON_GOLEM && target instanceof IronGolem ironGolem) {
-                        if (!ironGolem.isPlayerCreated()) {
-                            baseXP = ExperienceConfig.getInstance().getCombatXP(type);
-                        }
-                    } else {
+        final double finalXP = baseXP * multiplier;
+
+        if (finalXP > 0) {
+            mcMMO.p.getFoliaLib().getScheduler().runAtEntity(target,
+                    new AwardCombatXpTask(mmoPlayer, primarySkillType, finalXP, target,
+                            xpGainReason));
+        }
+    }
+
+    private static boolean isPvpXpIneligible(@NotNull McMMOPlayer mmoPlayer,
+            @NotNull Player defender) {
+        return defender.equals(mmoPlayer.getPlayer())
+                || !ExperienceConfig.getInstance().getExperienceGainsPlayerVersusPlayerEnabled()
+                || (mcMMO.p.getPartyConfig().isPartyEnabled()
+                && mcMMO.p.getPartyManager().inSameParty(mmoPlayer.getPlayer(), defender));
+    }
+
+    private static double calculatePvpBaseXP(@NotNull McMMOPlayer mmoPlayer,
+            @NotNull Player defender) {
+        if (defender.isOnline() && SkillUtils.cooldownExpired(mmoPlayer.getRespawnATS(),
+                Misc.PLAYER_RESPAWN_COOLDOWN_SECONDS)) {
+            return 20 * ExperienceConfig.getInstance().getPlayerVersusPlayerXP();
+        }
+
+        return 0;
+    }
+
+    private static double calculatePveBaseXP(@NotNull LivingEntity target) {
+        double baseXP = 0;
+        final EntityType type = target.getType();
+
+        if (target instanceof Animals) {
+            baseXP = ExperienceConfig.getInstance().getAnimalsXP(type);
+        } else if (target instanceof Monster) {
+            baseXP = ExperienceConfig.getInstance().getCombatXP(type);
+        } else {
+            if (ExperienceConfig.getInstance().hasCombatXP(type)) {
+                if (type == EntityType.IRON_GOLEM && target instanceof IronGolem ironGolem) {
+                    if (!ironGolem.isPlayerCreated()) {
                         baseXP = ExperienceConfig.getInstance().getCombatXP(type);
                     }
                 } else {
-                    baseXP = 1.0;
+                    baseXP = ExperienceConfig.getInstance().getCombatXP(type);
                 }
+            } else {
+                baseXP = 1.0;
             }
-
-            if (hasMobFlag(MobMetaFlagType.COTW_SUMMONED_MOB, target)) {
-                baseXP = 0;
-            } else if (hasMobFlag(MobMetaFlagType.MOB_SPAWNER_MOB, target) || target.hasMetadata(
-                    "ES")) {
-                baseXP *= ExperienceConfig.getInstance().getSpawnedMobXpMultiplier();
-            } else if (hasMobFlag(MobMetaFlagType.NETHER_PORTAL_MOB, target)) {
-                baseXP *= ExperienceConfig.getInstance().getNetherPortalXpMultiplier();
-            } else if (hasMobFlag(MobMetaFlagType.EGG_MOB, target)) {
-                baseXP *= ExperienceConfig.getInstance().getEggXpMultiplier();
-            } else if (hasMobFlag(MobMetaFlagType.PLAYER_BRED_MOB, target)) {
-                baseXP *= ExperienceConfig.getInstance().getBredMobXpMultiplier();
-            } else if (hasMobFlag(MobMetaFlagType.PLAYER_TAMED_MOB, target)) {
-                baseXP *= ExperienceConfig.getInstance().getTamedMobXpMultiplier();
-            }
-
-            baseXP *= 10;
-            xpGainReason = XPGainReason.PVE;
         }
 
-        baseXP *= multiplier;
-
-        if (baseXP > 0) {
-            mcMMO.p.getFoliaLib().getScheduler().runAtEntity(target,
-                    new AwardCombatXpTask(mmoPlayer, primarySkillType, baseXP, target,
-                            xpGainReason));
+        if (hasMobFlag(MobMetaFlagType.COTW_SUMMONED_MOB, target)) {
+            baseXP = 0;
+        } else if (hasMobFlag(MobMetaFlagType.MOB_SPAWNER_MOB, target)
+                || target.hasMetadata("ES")) {
+            baseXP *= ExperienceConfig.getInstance().getSpawnedMobXpMultiplier();
+        } else if (hasMobFlag(MobMetaFlagType.NETHER_PORTAL_MOB, target)) {
+            baseXP *= ExperienceConfig.getInstance().getNetherPortalXpMultiplier();
+        } else if (hasMobFlag(MobMetaFlagType.EGG_MOB, target)) {
+            baseXP *= ExperienceConfig.getInstance().getEggXpMultiplier();
+        } else if (hasMobFlag(MobMetaFlagType.PLAYER_BRED_MOB, target)) {
+            baseXP *= ExperienceConfig.getInstance().getBredMobXpMultiplier();
+        } else if (hasMobFlag(MobMetaFlagType.PLAYER_TAMED_MOB, target)) {
+            baseXP *= ExperienceConfig.getInstance().getTamedMobXpMultiplier();
         }
+
+        return baseXP * 10;
     }
 
     /**
@@ -1078,12 +1172,13 @@ public final class CombatUtils {
     private static boolean shouldBeAffected(@NotNull Player player, @NotNull Entity entity) {
         if (entity instanceof Player defender) {
             //TODO: NPC Interaction?
-            if (UserManager.getPlayer(defender) == null) {
+            final McMMOPlayer mmoDefender = UserManager.getPlayer(defender);
+            if (mmoDefender == null) {
                 return true;
             }
 
-            if (!defender.getWorld().getPVP() || defender == player || UserManager.getPlayer(
-                    defender).getGodMode()) {
+            if (!defender.getWorld().getPVP() || defender == player
+                    || mmoDefender.getGodMode()) {
                 return false;
             }
 

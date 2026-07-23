@@ -1,8 +1,9 @@
 package com.gmail.nossr50.datatypes.player;
 
 import com.gmail.nossr50.config.experience.ExperienceConfig;
+import com.gmail.nossr50.datatypes.experience.DiminishedReturnsCache;
+import com.gmail.nossr50.datatypes.experience.DiminishedReturnsState;
 import com.gmail.nossr50.datatypes.experience.FormulaType;
-import com.gmail.nossr50.datatypes.experience.SkillXpGain;
 import com.gmail.nossr50.datatypes.skills.PrimarySkillType;
 import com.gmail.nossr50.datatypes.skills.SuperAbilityType;
 import com.gmail.nossr50.mcMMO;
@@ -15,7 +16,6 @@ import java.util.EnumMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.DelayQueue;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -41,10 +41,8 @@ public class PlayerProfile {
     private final Map<UniqueDataType, Integer> uniquePlayerData = new EnumMap<>(
             UniqueDataType.class); //Misc data that doesn't fit into other categories (chimaera wing, etc..)
 
-    // Store previous XP gains for diminished returns
-    private final DelayQueue<SkillXpGain> gainedSkillsXp = new DelayQueue<>();
-    private final Map<PrimarySkillType, Float> rollingSkillsXp = new EnumMap<>(
-            PrimarySkillType.class);
+    // Store previous XP gains for diminished returns (persisted across reconnects via cache)
+    private final DiminishedReturnsState diminishedReturnsState;
 
     @Deprecated
     public PlayerProfile(String playerName) {
@@ -64,6 +62,7 @@ public class PlayerProfile {
     public PlayerProfile(String playerName, @Nullable UUID uuid, int startingLevel) {
         this.uuid = uuid;
         this.playerName = playerName;
+        this.diminishedReturnsState = DiminishedReturnsCache.getOrCreate(uuid);
 
         scoreboardTipsShown = 0;
 
@@ -99,6 +98,7 @@ public class PlayerProfile {
         this.playerName = playerName;
         this.uuid = uuid;
         this.scoreboardTipsShown = scoreboardTipsShown;
+        this.diminishedReturnsState = DiminishedReturnsCache.getOrCreate(uuid);
 
         skills.putAll(levelData);
         skillsXp.putAll(xpData);
@@ -132,47 +132,58 @@ public class PlayerProfile {
             return;
         }
 
-        // TODO should this part be synchronized?
-        PlayerProfile profileCopy = new PlayerProfile(playerName, uuid, ImmutableMap.copyOf(skills),
-                ImmutableMap.copyOf(skillsXp), ImmutableMap.copyOf(abilityDATS),
-                scoreboardTipsShown, ImmutableMap.copyOf(uniquePlayerData), lastLogin);
-        changed = !mcMMO.getDatabaseManager().saveUser(profileCopy);
+        // Clear the dirty flag before copying: a change that lands while the copy is being
+        // written re-marks the profile dirty and is picked up by the next save, instead of
+        // being wiped by an unconditional flag write once the database returns
+        changed = false;
+        boolean saved = false;
 
-        if (changed) {
-            mcMMO.p.getLogger()
-                    .severe("PlayerProfile saving failed for player: " + playerName + " " + uuid);
-
-            if (saveAttempts > 0) {
-                mcMMO.p.getLogger().severe("Attempted to save profile for player " + getPlayerName()
-                        + " resulted in failure. " + saveAttempts + " have been made so far.");
+        try {
+            final PlayerProfile profileCopy = new PlayerProfile(playerName, uuid,
+                    ImmutableMap.copyOf(skills), ImmutableMap.copyOf(skillsXp),
+                    ImmutableMap.copyOf(abilityDATS), scoreboardTipsShown,
+                    ImmutableMap.copyOf(uniquePlayerData), lastLogin);
+            saved = mcMMO.getDatabaseManager().saveUser(profileCopy);
+        } finally {
+            if (!saved) {
+                changed = true;
             }
+        }
 
-            if (saveAttempts < 10) {
-                saveAttempts++;
+        if (saved) {
+            saveAttempts = 0;
+            return;
+        }
 
-                //Back out of async saving if we detect a server shutdown, this is not always going to be caught
-                if (mcMMO.isServerShutdownExecuted() || useSync) {
-                    mcMMO.p.getFoliaLib().getScheduler()
-                            .runNextTick(new PlayerProfileSaveTask(this, true));
-                } else {
-                    scheduleAsyncSave();
-                }
+        mcMMO.p.getLogger()
+                .severe("PlayerProfile saving failed for player: " + playerName + " " + uuid);
 
+        if (saveAttempts > 0) {
+            mcMMO.p.getLogger().severe("Attempted to save profile for player " + getPlayerName()
+                    + " resulted in failure. " + saveAttempts + " have been made so far.");
+        }
+
+        if (saveAttempts < 10) {
+            saveAttempts++;
+
+            //Back out of async saving if we detect a server shutdown, this is not always going to be caught
+            if (mcMMO.isServerShutdownExecuted() || useSync) {
+                mcMMO.p.getFoliaLib().getScheduler()
+                        .runNextTick(new PlayerProfileSaveTask(this, true));
             } else {
-                mcMMO.p.getLogger().severe("mcMMO has failed to save the profile for "
-                        + getPlayerName() + " numerous times." +
-                        " mcMMO will now stop attempting to save this profile." +
-                        " Check your console for errors and inspect your DB for issues.");
+                scheduleAsyncSave();
             }
 
         } else {
-            saveAttempts = 0;
+            mcMMO.p.getLogger().severe("mcMMO has failed to save the profile for "
+                    + getPlayerName() + " numerous times." +
+                    " mcMMO will now stop attempting to save this profile." +
+                    " Check your console for errors and inspect your DB for issues.");
         }
     }
 
     /**
-     * Get this users last login, will return current java.lang.System#currentTimeMillis() if it
-     * doesn't exist
+     * Get this users last login, will return -1 if it doesn't exist
      *
      * @return the last login
      * @deprecated This is only function for FlatFileDB atm, and it's only here for unit testing
@@ -229,8 +240,16 @@ public class PlayerProfile {
      * Cooldowns
      */
 
-    public int getChimaerWingDATS() {
+    public int getChimaeraWingDATS() {
         return uniquePlayerData.get(UniqueDataType.CHIMAERA_WING_DATS);
+    }
+
+    /**
+     * @deprecated misspelled, use {@link #getChimaeraWingDATS()} instead
+     */
+    @Deprecated(forRemoval = true, since = "2.3.000")
+    public int getChimaerWingDATS() {
+        return getChimaeraWingDATS();
     }
 
     protected void setChimaeraWingDATS(int DATS) {
@@ -287,6 +306,11 @@ public class PlayerProfile {
     }
 
     public float getSkillXpLevelRaw(PrimarySkillType skill) {
+        // Child skills store no XP of their own; zero matches getSkillXpLevel
+        if (SkillTools.isChildSkill(skill)) {
+            return 0F;
+        }
+
         return skillsXp.get(skill);
     }
 
@@ -368,12 +392,24 @@ public class PlayerProfile {
     }
 
     /**
-     * Add levels to a skill.
+     * Add levels to a skill. Levels added to a child skill are split evenly across its parent
+     * skills, mirroring how child skill XP is handled.
      *
      * @param skill Type of skill to add levels to
      * @param levels Number of levels to add
      */
     public void addLevels(PrimarySkillType skill, int levels) {
+        if (SkillTools.isChildSkill(skill)) {
+            var parentSkills = mcMMO.p.getSkillTools().getChildSkillParents(skill);
+            int dividedLevels = levels / parentSkills.size();
+
+            for (PrimarySkillType parentSkill : parentSkills) {
+                addLevels(parentSkill, dividedLevels);
+            }
+
+            return;
+        }
+
         modifySkill(skill, skills.get(skill) + levels);
     }
 
@@ -404,13 +440,7 @@ public class PlayerProfile {
      * @return xp Experience amount registered
      */
     public float getRegisteredXpGain(PrimarySkillType primarySkillType) {
-        float xp = 0F;
-
-        if (rollingSkillsXp.get(primarySkillType) != null) {
-            xp = rollingSkillsXp.get(primarySkillType);
-        }
-
-        return xp;
+        return diminishedReturnsState.getRegisteredXpGain(primarySkillType);
     }
 
     /**
@@ -420,19 +450,16 @@ public class PlayerProfile {
      * @param xp Experience amount to add
      */
     public void registerXpGain(PrimarySkillType primarySkillType, float xp) {
-        gainedSkillsXp.add(new SkillXpGain(primarySkillType, xp));
-        rollingSkillsXp.put(primarySkillType, getRegisteredXpGain(primarySkillType) + xp);
+        if (ExperienceConfig.getInstance().getDiminishedReturnsEnabled()) {
+            diminishedReturnsState.registerXpGain(primarySkillType, xp);
+        }
     }
 
     /**
      * Remove experience gains older than a given time This is used for diminished XP returns
      */
     public void purgeExpiredXpGains() {
-        SkillXpGain gain;
-        while ((gain = gainedSkillsXp.poll()) != null) {
-            rollingSkillsXp.put(gain.getSkill(),
-                    getRegisteredXpGain(gain.getSkill()) - gain.getXp());
-        }
+        diminishedReturnsState.purgeExpiredXpGains();
     }
 
     /**
@@ -447,10 +474,31 @@ public class PlayerProfile {
         }
 
         int level = (ExperienceConfig.getInstance().getCumulativeCurveEnabled())
-                ? UserManager.getPlayer(playerName).getPowerLevel() : skills.get(primarySkillType);
+                ? getPowerLevelForCumulativeCurve() : skills.get(primarySkillType);
         FormulaType formulaType = ExperienceConfig.getInstance().getFormulaType();
 
         return mcMMO.getFormulaManager().getXPtoNextLevel(level, formulaType);
+    }
+
+    /**
+     * The cumulative curve levels against the player's power level. Offline-loaded profiles
+     * have no online player to ask, so the profile's own level sum stands in (the online power
+     * level is permission-aware, which cannot be evaluated offline).
+     */
+    private int getPowerLevelForCumulativeCurve() {
+        final McMMOPlayer mmoPlayer = UserManager.getPlayer(playerName);
+
+        if (mmoPlayer != null) {
+            return mmoPlayer.getPowerLevel();
+        }
+
+        int levelSum = 0;
+
+        for (PrimarySkillType primarySkillType : SkillTools.NON_CHILD_SKILLS) {
+            levelSum += skills.get(primarySkillType);
+        }
+
+        return levelSum;
     }
 
     private int getChildSkillLevel(@NotNull PrimarySkillType primarySkillType)

@@ -1,5 +1,6 @@
 package com.gmail.nossr50.skills.fishing;
 
+import com.gmail.nossr50.api.FakeBlockBreakEventType;
 import com.gmail.nossr50.api.ItemSpawnReason;
 import com.gmail.nossr50.config.experience.ExperienceConfig;
 import com.gmail.nossr50.config.treasure.FishingTreasureConfig;
@@ -52,6 +53,7 @@ import org.bukkit.entity.Sheep;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.util.BoundingBox;
 import org.bukkit.util.Vector;
@@ -63,6 +65,7 @@ public class FishingManager extends SkillManager {
     protected long lastWarned = 0L;
     private BoundingBox lastFishingBoundingBox;
     private boolean sameTarget;
+    private boolean fishingTooOften;
     private int fishCaughtCounter = 1;
     private final int masterAnglerMinWaitLowerBound;
     private final int masterAnglerMaxWaitLowerBound;
@@ -102,8 +105,19 @@ public class FishingManager extends SkillManager {
         }
 
         lastFishCaughtTimestamp = currentTime;
+        fishingTooOften = hasFishedRecently;
 
         return hasFishedRecently;
+    }
+
+    /**
+     * {@return the verdict of the most recent {@link #isFishingTooOften()} check}
+     * Unlike {@link #isFishingTooOften()} this does not update the catch timestamp, so
+     * handlers running later in the same event chain can re-read the verdict without every
+     * catch being treated as a repeat.
+     */
+    public boolean wasFishingTooOften() {
+        return fishingTooOften;
     }
 
     public void processExploiting(Vector centerOfCastVector) {
@@ -191,7 +205,7 @@ public class FishingManager extends SkillManager {
             return false;
         }
 
-        return EventUtils.simulateBlockBreak(block, player);
+        return EventUtils.simulateBlockBreak(block, player, FakeBlockBreakEventType.FAKE);
     }
 
     /**
@@ -568,7 +582,9 @@ public class FishingManager extends SkillManager {
                     break;
             }
 
-            McMMOPlayerShakeEvent shakeEvent = new McMMOPlayerShakeEvent(getPlayer(), drop);
+            final McMMOPlayerShakeEvent shakeEvent =
+                    new McMMOPlayerShakeEvent(getPlayer(), drop);
+            mcMMO.p.getServer().getPluginManager().callEvent(shakeEvent);
 
             drop = shakeEvent.getDrop();
 
@@ -691,11 +707,24 @@ public class FishingManager extends SkillManager {
 
         int specificChance = 1;
 
+        outer:
         for (EnchantmentTreasure enchantmentTreasure : possibleEnchants) {
             Enchantment possibleEnchantment = enchantmentTreasure.getEnchantment();
 
-            if (treasureDrop.getItemMeta().hasConflictingEnchant(possibleEnchantment)
-                    || Misc.getRandom().nextInt(specificChance) != 0) {
+            if (!mcMMO.p.getGeneralConfig().getFishingAllowConflictingEnchants()) {
+                final ItemMeta meta = treasureDrop.getItemMeta();
+                if (meta != null && meta.hasConflictingEnchant(possibleEnchantment)) {
+                    continue;
+                }
+
+                for (final Enchantment existingEnchantment : enchants.keySet()) {
+                    if (existingEnchantment.conflictsWith(possibleEnchantment)) {
+                        continue outer;
+                    }
+                }
+            }
+
+            if (Misc.getRandom().nextInt(specificChance) != 0) {
                 continue;
             }
 

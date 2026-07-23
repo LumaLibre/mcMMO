@@ -42,38 +42,60 @@ public final class PerksUtils {
         }
 
         final SkillActivationPerkEvent skillActivationPerkEvent = new SkillActivationPerkEvent(
-                player, ticks, maxTicks);
+            player, ticks, maxTicks);
         Bukkit.getPluginManager().callEvent(skillActivationPerkEvent);
         return skillActivationPerkEvent.getTicks();
     }
 
     public static float handleXpPerks(Player player, float xp, PrimarySkillType skill) {
-        double modifier = XPBoostAmount.NONE;
+        final McMMOPlayer mmoPlayer = UserManager.getPlayer(player);
+        final boolean debugMode = mmoPlayer != null && mmoPlayer.isDebugMode();
 
-        for (XPBoostAmount xpBoostAmount : XPBoostAmount.getByHighestMultiplier()) {
-            if (xpBoostAmount.hasBoostPermission(player, skill)) {
-                modifier = xpBoostAmount.getMultiplier();
+        final double modifier;
 
-                if (xpBoostAmount == XPBoostAmount.CUSTOM && UserManager.getPlayer(player) != null && UserManager.getPlayer(player).isDebugMode()) {
-                    player.sendMessage(ChatColor.GOLD + "[DEBUG] " + ChatColor.DARK_GRAY + "XP perk multiplier is custom!");
-                }
-                break;
+        if (XPBoostAmount.CUSTOM.hasBoostPermission(player, skill)) {
+            if (debugMode) {
+                player.sendMessage(ChatColor.GOLD + "[DEBUG] " + ChatColor.DARK_GRAY
+                    + "XP perk multiplier is custom!");
             }
+
+            modifier = XPBoostAmount.CUSTOM.getMultiplier();
+        } else {
+            modifier = resolveXpPerkModifier(player, skill);
         }
 
-        float modifiedXP = (float) (xp * modifier);
+        final float modifiedXP = (float) (xp * modifier);
 
-        if (UserManager.getPlayer(player) != null && UserManager.getPlayer(player).isDebugMode()) {
+        if (debugMode) {
             player.sendMessage(
-                    ChatColor.GOLD + "[DEBUG] " + ChatColor.RESET + "XP Perk Multiplier - "
-                            + ChatColor.GOLD + modifier);
+                ChatColor.GOLD + "[DEBUG] " + ChatColor.RESET + "XP Perk Multiplier - "
+                    + ChatColor.GOLD + modifier);
             player.sendMessage(ChatColor.GOLD + "[DEBUG] " + ChatColor.RESET
-                    + "Original XP before perk boosts " + ChatColor.RED + (double) xp);
+                + "Original XP before perk boosts " + ChatColor.RED + (double) xp);
             player.sendMessage(ChatColor.GOLD + "[DEBUG] " + ChatColor.RESET + "XP AFTER PERKS "
-                    + ChatColor.DARK_RED + modifiedXP);
+                + ChatColor.DARK_RED + modifiedXP);
         }
 
         return modifiedXP;
+    }
+
+    /**
+     * Resolves the fixed-multiplier XP perk the player holds. Tiers are checked strongest-first
+     * and the first match wins; the custom boost is handled separately by the caller because it
+     * outranks every fixed tier regardless of its configured multiplier.
+     */
+    private static double resolveXpPerkModifier(Player player, PrimarySkillType skill) {
+        for (XPBoostAmount xpBoostAmount : XPBoostAmount.getByHighestMultiplier()) {
+            if (xpBoostAmount == XPBoostAmount.CUSTOM) {
+                continue;
+            }
+
+            if (xpBoostAmount.hasBoostPermission(player, skill)) {
+                return xpBoostAmount.getMultiplier();
+            }
+        }
+
+        return XPBoostAmount.NONE.getMultiplier();
     }
 
     /**
@@ -82,7 +104,10 @@ public final class PerksUtils {
      * @param player Player to check the activation chance for
      * @param skill PrimarySkillType to check the activation chance of
      * @return the activation chance with "lucky perk" accounted for
+     * @deprecated The lucky perk is applied inside the skill RNG; no remaining callers.
+     * Scheduled for removal.
      */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public static int handleLuckyPerks(Player player, PrimarySkillType skill) {
         if (Permissions.lucky(player, skill)) {
             return LUCKY_SKILL_ACTIVATION_CHANCE;
@@ -97,7 +122,10 @@ public final class PerksUtils {
      * @param mmoPlayer Player to check the activation chance for
      * @param skill PrimarySkillType to check the activation chance of
      * @return the activation chance with "lucky perk" accounted for
+     * @deprecated The lucky perk is applied inside the skill RNG; no remaining callers.
+     * Scheduled for removal.
      */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public static int handleLuckyPerks(McMMOPlayer mmoPlayer, PrimarySkillType skill) {
         if (Permissions.lucky(mmoPlayer.getPlayer(), skill)) {
             return LUCKY_SKILL_ACTIVATION_CHANCE;

@@ -1,5 +1,6 @@
 package com.gmail.nossr50.util;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -12,10 +13,16 @@ import static org.mockito.Mockito.when;
 
 import com.gmail.nossr50.MMOTestEnvironment;
 import com.gmail.nossr50.api.exceptions.InvalidSkillException;
+import com.gmail.nossr50.datatypes.treasure.EnchantmentWrapper;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Logger;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.Damageable;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -80,5 +87,97 @@ class ItemUtilsTest extends MMOTestEnvironment {
         when(seedStack.isSimilar(any(ItemStack.class))).thenReturn(false);
 
         return seedStack;
+    }
+
+    /**
+     * Items can carry a max_damage component that overrides the vanilla material
+     * maximum; the durability paths rely on this helper picking the right source.
+     */
+    @Test
+    void getItemMaxDamageShouldPreferMaxDamageComponentWhenPresent() {
+        // Given - an item whose meta declares a max_damage larger than the vanilla maximum
+        final ItemStack pickaxe = mock(ItemStack.class);
+        final Damageable damageableMeta = mock(Damageable.class);
+        when(pickaxe.getItemMeta()).thenReturn(damageableMeta);
+        when(damageableMeta.hasMaxDamage()).thenReturn(true);
+        when(damageableMeta.getMaxDamage()).thenReturn(3000);
+
+        // When - the effective max damage is resolved
+        final int maxDamage = ItemUtils.getItemMaxDamage(pickaxe);
+
+        // Then - the component value wins over the vanilla material maximum
+        assertThat(maxDamage).isEqualTo(3000);
+    }
+
+    @Test
+    void getItemMaxDamageShouldPreferMaxDamageComponentWhenLowerThanVanillaMax() {
+        // Given - a component max BELOW the vanilla maximum; such items break earlier
+        // than their material suggests, so the component must still win
+        final ItemStack pickaxe = mock(ItemStack.class);
+        final Damageable damageableMeta = mock(Damageable.class);
+        when(pickaxe.getItemMeta()).thenReturn(damageableMeta);
+        when(damageableMeta.hasMaxDamage()).thenReturn(true);
+        when(damageableMeta.getMaxDamage()).thenReturn(100);
+
+        // When - the effective max damage is resolved
+        final int maxDamage = ItemUtils.getItemMaxDamage(pickaxe);
+
+        // Then - the smaller component value is respected
+        assertThat(maxDamage).isEqualTo(100);
+    }
+
+    @Test
+    void getItemMaxDamageShouldFallBackToVanillaMaxWhenComponentAbsent() {
+        // Given - a damageable item without a max_damage component
+        final ItemStack pickaxe = mock(ItemStack.class);
+        final Damageable damageableMeta = mock(Damageable.class);
+        when(pickaxe.getItemMeta()).thenReturn(damageableMeta);
+        when(pickaxe.getType()).thenReturn(Material.DIAMOND_PICKAXE);
+        when(damageableMeta.hasMaxDamage()).thenReturn(false);
+
+        // When - the effective max damage is resolved
+        final int maxDamage = ItemUtils.getItemMaxDamage(pickaxe);
+
+        // Then - the vanilla material maximum applies
+        assertThat(maxDamage).isEqualTo((int) Material.DIAMOND_PICKAXE.getMaxDurability());
+    }
+
+    /**
+     * FishingTreasureBook hands out its live internal enchantment list, so the random roll
+     * must never reorder or otherwise mutate what it is given.
+     */
+    @Test
+    void getRandomEnchantmentShouldNotMutateTheProvidedList() {
+        // Given - a treasure book's legal-enchantment list shared between catches
+        // (wrappers are mocked because Enchantment cannot initialize without a live registry)
+        when(Misc.getRandom()).thenReturn(new Random(42));
+        final List<EnchantmentWrapper> legalEnchantments = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            legalEnchantments.add(mock(EnchantmentWrapper.class));
+        }
+        final List<EnchantmentWrapper> orderBeforeRoll = List.copyOf(legalEnchantments);
+
+        // When - a random enchantment is rolled from the list
+        final EnchantmentWrapper selected = ItemUtils.getRandomEnchantment(legalEnchantments);
+
+        // Then - the roll picks an element of the list
+        assertThat(selected).isIn(legalEnchantments);
+        // And - the shared list keeps its original order
+        assertThat(legalEnchantments).containsExactlyElementsOf(orderBeforeRoll);
+    }
+
+    @Test
+    void getItemMaxDamageShouldFallBackToVanillaMaxWhenMetaNotDamageable() {
+        // Given - an item whose meta does not support durability at all
+        final ItemStack stick = mock(ItemStack.class);
+        final ItemMeta plainMeta = mock(ItemMeta.class);
+        when(stick.getItemMeta()).thenReturn(plainMeta);
+        when(stick.getType()).thenReturn(Material.STICK);
+
+        // When - the effective max damage is resolved
+        final int maxDamage = ItemUtils.getItemMaxDamage(stick);
+
+        // Then - the vanilla material maximum applies (0 for non-damageable materials)
+        assertThat(maxDamage).isEqualTo((int) Material.STICK.getMaxDurability());
     }
 }

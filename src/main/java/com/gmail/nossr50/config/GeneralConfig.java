@@ -11,8 +11,11 @@ import com.gmail.nossr50.datatypes.skills.SuperAbilityType;
 import com.gmail.nossr50.util.text.StringUtils;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import org.bukkit.Material;
 import org.bukkit.block.data.BlockData;
@@ -21,8 +24,32 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 public class GeneralConfig extends BukkitConfig {
+    // Floor for how often leaderboards may rebuild; shared with FlatFileDatabaseManager's
+    // rebuild throttle so the config clamp and the runtime throttle can never disagree.
+    public static final int MIN_LEADERBOARD_REFRESH_INTERVAL_SECONDS = 60;
+    // Each tracked rank is cached for every non-child skill plus overall, and every cache
+    // refresh re-reads that many rows per leaderboard, so the ceiling bounds both memory
+    // use and periodic database load.
+    private static final int MIN_PAPI_LEADERBOARD_TRACKED_RANK = 10;
+    private static final int MAX_PAPI_LEADERBOARD_TRACKED_RANK = 1000;
+
     private @Nullable Material repairAnvilMaterial;
     private @Nullable Material salvageAnvilMaterial;
+
+    /* Level caps resolved once and reused on the XP hot path; reset by loadKeys() */
+    private @Nullable Integer powerLevelCap;
+    private final Map<PrimarySkillType, Integer> levelCaps = new EnumMap<>(
+            PrimarySkillType.class);
+
+    /* Values resolved once and reused on hot event paths; reset by loadKeys() */
+    private @Nullable Boolean abilitiesEnabled;
+    private @Nullable Boolean abilityMessagesEnabled;
+    private @Nullable Boolean abilitiesOnlyActivateWhenSneaking;
+    private @Nullable Boolean abilitiesGateEnabled;
+    private final Map<PrimarySkillType, Map<Material, Boolean>> doubleDropsEnabled =
+            new EnumMap<>(PrimarySkillType.class);
+    private final Map<Material, Boolean> woodcuttingDoubleDropsEnabled = new HashMap<>();
+    private final Map<String, Material> tamingCOTWMaterials = new HashMap<>();
 
     public GeneralConfig(@NotNull File dataFolder) {
         super("config.yml", dataFolder);
@@ -36,6 +63,15 @@ public class GeneralConfig extends BukkitConfig {
                 config.getString("Skills.Repair.Anvil_Material", "IRON_BLOCK"));
         salvageAnvilMaterial = Material.matchMaterial(
                 config.getString("Skills.Salvage.Anvil_Material", "GOLD_BLOCK"));
+        powerLevelCap = null;
+        levelCaps.clear();
+        abilitiesEnabled = null;
+        abilityMessagesEnabled = null;
+        abilitiesOnlyActivateWhenSneaking = null;
+        abilitiesGateEnabled = null;
+        doubleDropsEnabled.clear();
+        woodcuttingDoubleDropsEnabled.clear();
+        tamingCOTWMaterials.clear();
     }
 
     @Override
@@ -236,6 +272,39 @@ public class GeneralConfig extends BukkitConfig {
         return config.getBoolean("General.Refresh_Chunks", false);
     }
 
+    public boolean getRegionDataMigrationBackupsEnabled() {
+        return config.getBoolean("General.RegionDataMigrationBackups", true);
+    }
+
+    /**
+     * @return Highest leaderboard position kept in the PlaceholderAPI cache, clamped between
+     * {@value #MIN_PAPI_LEADERBOARD_TRACKED_RANK} and {@value #MAX_PAPI_LEADERBOARD_TRACKED_RANK}.
+     */
+    public int getPapiLeaderboardMaxTrackedRank() {
+        final int configured =
+                config.getInt("General.PlaceholderAPI.Leaderboards.Max_Tracked_Rank", 100);
+        return Math.min(MAX_PAPI_LEADERBOARD_TRACKED_RANK,
+                Math.max(MIN_PAPI_LEADERBOARD_TRACKED_RANK, configured));
+    }
+
+    /**
+     * @return SQL leaderboard cache refresh interval in seconds, never below
+     * {@value #MIN_LEADERBOARD_REFRESH_INTERVAL_SECONDS}.
+     */
+    public int getLeaderboardRefreshIntervalSecondsSQL() {
+        return Math.max(MIN_LEADERBOARD_REFRESH_INTERVAL_SECONDS,
+                config.getInt("General.Leaderboards.Refresh_Interval_Seconds.SQL", 60));
+    }
+
+    /**
+     * @return FlatFile leaderboard cache refresh interval in seconds, never below
+     * {@value #MIN_LEADERBOARD_REFRESH_INTERVAL_SECONDS}.
+     */
+    public int getLeaderboardRefreshIntervalSecondsFlatFile() {
+        return Math.max(MIN_LEADERBOARD_REFRESH_INTERVAL_SECONDS,
+                config.getInt("General.Leaderboards.Refresh_Interval_Seconds.FlatFile", 600));
+    }
+
     public boolean getMobHealthbarEnabled() {
         return config.getBoolean("Mob_Healthbar.Enabled", true);
     }
@@ -358,10 +427,20 @@ public class GeneralConfig extends BukkitConfig {
         return config.getInt("Scoreboard.Types.Skill.Display_Time", 30);
     }
 
+    /**
+     * @deprecated The level-up scoreboard feature this key belonged to never worked; the key
+     * was removed from config.yml and this getter is scheduled for removal.
+     */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public boolean getSkillLevelUpBoard() {
         return config.getBoolean("Scoreboard.Types.Skill.LevelUp_Board", true);
     }
 
+    /**
+     * @deprecated The level-up scoreboard feature this key belonged to never worked; the key
+     * was removed from config.yml and this getter is scheduled for removal.
+     */
+    @Deprecated(forRemoval = true, since = "2.3.000")
     public int getSkillLevelUpTime() {
         return config.getInt("Scoreboard.Types.Skill.LevelUp_Time", 5);
     }
@@ -701,19 +780,36 @@ public class GeneralConfig extends BukkitConfig {
     }
 
     public boolean getAbilityMessagesEnabled() {
-        return config.getBoolean("Abilities.Messages", true);
+        if (abilityMessagesEnabled == null) {
+            abilityMessagesEnabled = config.getBoolean("Abilities.Messages", true);
+        }
+
+        return abilityMessagesEnabled;
     }
 
     public boolean getAbilitiesEnabled() {
-        return config.getBoolean("Abilities.Enabled", true);
+        if (abilitiesEnabled == null) {
+            abilitiesEnabled = config.getBoolean("Abilities.Enabled", true);
+        }
+
+        return abilitiesEnabled;
     }
 
     public boolean getAbilitiesOnlyActivateWhenSneaking() {
-        return config.getBoolean("Abilities.Activation.Only_Activate_When_Sneaking", false);
+        if (abilitiesOnlyActivateWhenSneaking == null) {
+            abilitiesOnlyActivateWhenSneaking = config.getBoolean(
+                    "Abilities.Activation.Only_Activate_When_Sneaking", false);
+        }
+
+        return abilitiesOnlyActivateWhenSneaking;
     }
 
     public boolean getAbilitiesGateEnabled() {
-        return config.getBoolean("Abilities.Activation.Level_Gate_Abilities");
+        if (abilitiesGateEnabled == null) {
+            abilitiesGateEnabled = config.getBoolean("Abilities.Activation.Level_Gate_Abilities");
+        }
+
+        return abilitiesGateEnabled;
     }
 
     public int getCooldown(SuperAbilityType ability) {
@@ -743,10 +839,10 @@ public class GeneralConfig extends BukkitConfig {
             return false;
         }
 
-        return config.getBoolean(
-                "Bonus_Drops." + StringUtils.getCapitalized(skill.toString()) + "."
-                        + getMaterialConfigString(
-                        material).replace(" ", "_"));
+        return doubleDropsEnabled.computeIfAbsent(skill, key -> new HashMap<>())
+                .computeIfAbsent(material, key -> config.getBoolean(
+                        "Bonus_Drops." + StringUtils.getCapitalized(skill.toString()) + "."
+                                + getMaterialConfigString(key).replace(" ", "_")));
     }
 
     public boolean getDoubleDropsDisabled(PrimarySkillType skill) {
@@ -810,6 +906,10 @@ public class GeneralConfig extends BukkitConfig {
 
     public double getFishingLureModifier() {
         return config.getDouble("Skills.Fishing.Lure_Modifier", 4.0D);
+    }
+
+    public boolean getFishingAllowConflictingEnchants() {
+        return config.getBoolean("Skills.Fishing.Allow_Conflicting_Enchants", false);
     }
 
     /* Mining */
@@ -907,9 +1007,11 @@ public class GeneralConfig extends BukkitConfig {
     //    public int getTamingCOTWMaxAmount(EntityType type) { return config.getInt("Skills.Taming.Call_Of_The_Wild." + StringUtils.getPrettyEntityTypeString(type)+ ".Summon_Max_Amount"); }
 
     public Material getTamingCOTWMaterial(String cotwEntity) {
-        return Material.matchMaterial(
-                config.getString(
-                        "Skills.Taming.Call_Of_The_Wild." + cotwEntity + ".Item_Material"));
+        // computeIfAbsent doesn't store null mappings, so a misconfigured material is simply
+        // looked up again on the next call
+        return tamingCOTWMaterials.computeIfAbsent(cotwEntity,
+                key -> Material.matchMaterial(config.getString(
+                        "Skills.Taming.Call_Of_The_Wild." + key + ".Item_Material")));
     }
 
     public int getTamingCOTWCost(String cotwEntity) {
@@ -931,8 +1033,9 @@ public class GeneralConfig extends BukkitConfig {
 
     /* Woodcutting */
     public boolean getWoodcuttingDoubleDropsEnabled(BlockData blockData) {
-        return config.getBoolean(
-                "Bonus_Drops.Woodcutting." + getMaterialConfigString(blockData.getMaterial()));
+        return woodcuttingDoubleDropsEnabled.computeIfAbsent(blockData.getMaterial(),
+                key -> config.getBoolean("Bonus_Drops.Woodcutting."
+                        + getMaterialConfigString(key)));
     }
 
     public boolean getTreeFellerSoundsEnabled() {
@@ -950,14 +1053,20 @@ public class GeneralConfig extends BukkitConfig {
 
     /* Level Caps */
     public int getPowerLevelCap() {
-        int cap = config.getInt("General.Power_Level_Cap", 0);
-        return (cap <= 0) ? Integer.MAX_VALUE : cap;
+        if (powerLevelCap == null) {
+            int cap = config.getInt("General.Power_Level_Cap", 0);
+            powerLevelCap = (cap <= 0) ? Integer.MAX_VALUE : cap;
+        }
+
+        return powerLevelCap;
     }
 
     public int getLevelCap(PrimarySkillType skill) {
-        int cap = config.getInt(
-                "Skills." + StringUtils.getCapitalized(skill.toString()) + ".Level_Cap");
-        return (cap <= 0) ? Integer.MAX_VALUE : cap;
+        return levelCaps.computeIfAbsent(skill, key -> {
+            int cap = config.getInt(
+                    "Skills." + StringUtils.getCapitalized(key.toString()) + ".Level_Cap");
+            return (cap <= 0) ? Integer.MAX_VALUE : cap;
+        });
     }
 
 

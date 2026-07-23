@@ -42,7 +42,9 @@ public class BitSetChunkStore implements ChunkStore {
         this.worldUid = worldUid;
         this.worldMin = worldMin;
         this.worldMax = worldMax;
-        this.store = new BitSet(16 * 16 * (worldMax - worldMin));
+        // Grows on demand; sizing it for the full world height would pin ~12KB per chunk
+        // even for chunks with no tracked blocks
+        this.store = new BitSet();
     }
 
     @Override
@@ -104,6 +106,25 @@ public class BitSetChunkStore implements ChunkStore {
     @Override
     public boolean isEmpty() {
         return store.isEmpty();
+    }
+
+    /**
+     * Merge anti-exploit "block is player-placed" markers from {@code other} into this store.
+     * Only set bits are copied; cleared bits in {@code other} never clear a bit that is set in
+     * this store. Used by the Paper world-folder layout migrator to fold legacy region data into
+     * post-migration region data without losing reward-denial markers.
+     */
+    void mergeFrom(@NotNull BitSetChunkStore other) {
+        if (!worldUid.equals(other.worldUid)) {
+            throw new IllegalArgumentException(
+                    "Cannot merge chunk stores from different worlds (this=" + worldUid
+                            + ", other=" + other.worldUid + ")");
+        }
+        if (other.store.isEmpty()) {
+            return;
+        }
+        store.or(other.store);
+        dirty = true;
     }
 
     private int coordToIndex(int x, int y, int z) {
@@ -168,7 +189,8 @@ public class BitSetChunkStore implements ChunkStore {
         int fileVersionNumber = in.readInt();
 
         if (magic != MAGIC_NUMBER || fileVersionNumber < 8) {
-            throw new IOException();
+            throw new IOException("Bad chunk store header (magic: " + Integer.toHexString(magic)
+                    + ", format version: " + fileVersionNumber + ")");
         }
 
         long lsb = in.readLong();
@@ -192,13 +214,18 @@ public class BitSetChunkStore implements ChunkStore {
         // The order in which the world height update code occurs here is important, the world max truncate math only holds up if done before adjusting for min changes
         // Lop off extra data if world max has shrunk
         if (currentWorldMax < worldMax) {
-            stored.clear(coordToIndex(16, currentWorldMax, 16, worldMin, worldMax),
-                    stored.length());
+            // Each Y plane is 16x16 bits; planes are stacked bottom-up starting at worldMin
+            int firstBitAboveNewMax = Math.max(0, 256 * (currentWorldMax - worldMin));
+            if (firstBitAboveNewMax < stored.length()) {
+                stored.clear(firstBitAboveNewMax, stored.length());
+            }
         }
-        // Left shift store if world min has shrunk
+        // Left shift store if world min has risen
         if (currentWorldMin > worldMin) {
-            stored = stored.get(currentWorldMin,
-                    stored.length()); // Because BitSet's aren't fixed size, a "substring" operation is equivalent to a left shift
+            int trimmedBottomBits = 256 * (currentWorldMin - worldMin);
+            // Because BitSets aren't fixed size, a "substring" operation is equivalent to a left shift
+            stored = trimmedBottomBits >= stored.length() ? new BitSet()
+                    : stored.get(trimmedBottomBits, stored.length());
         }
         // Right shift store if world min has expanded
         if (currentWorldMin < worldMin) {

@@ -113,7 +113,11 @@ public abstract class ExperienceCommand implements TabExecutor {
                             isSilent(args));
                 }
 
-                handleSenderMessage(sender, playerName, skill);
+                // -s silences the whole command; plugins dispatch it from console for XP
+                // rewards, and the confirmation would flood the log on every dispatch
+                if (!isSilent(args)) {
+                    handleSenderMessage(sender, playerName, skill);
+                }
                 return true;
             } else {
                 return false;
@@ -141,6 +145,13 @@ public abstract class ExperienceCommand implements TabExecutor {
                 return StringUtil.copyPartialMatches(args[0], playerNames,
                         new ArrayList<>(playerNames.size()));
             case 2:
+                // Self-targeting form like '/mmoedit all 1000': when the first argument is
+                // already a skill (or 'all'), the next argument is a number, not a skill
+                if (args[0].equalsIgnoreCase("all")
+                        || mcMMO.p.getSkillTools().matchSkill(args[0]) != null) {
+                    return ImmutableList.of();
+                }
+
                 return StringUtil.copyPartialMatches(args[1],
                         mcMMO.p.getSkillTools().LOCALIZED_SKILL_NAMES,
                         new ArrayList<>(mcMMO.p.getSkillTools().LOCALIZED_SKILL_NAMES.size()));
