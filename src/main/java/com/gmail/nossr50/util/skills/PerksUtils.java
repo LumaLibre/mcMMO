@@ -95,7 +95,7 @@ public final class PerksUtils {
             }
         }
 
-        return XPBoostAmount.NONE.getMultiplier();
+        return XPBoostAmount.NONE;
     }
 
     /**
