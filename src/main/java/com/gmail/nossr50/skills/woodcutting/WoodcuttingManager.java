@@ -35,6 +35,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Predicate;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.Tag;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.block.BlockState;
@@ -242,14 +243,22 @@ public class WoodcuttingManager extends SkillManager {
      */
     @VisibleForTesting
     void processTree(Block block, Set<Block> treeFellerBlocks) {
+        processTree(block, treeFellerBlocks, isStraightTrunkTree(block) ? block : null);
+    }
+
+    private static boolean isStraightTrunkTree(@NotNull Block block) {
+        return Tag.SPRUCE_LOGS.isTagged(block.getType());
+    }
+
+    private void processTree(Block block, Set<Block> treeFellerBlocks, Block trunkOrigin) {
         List<Block> futureCenterBlocks = new ArrayList<>();
 
         // Check the block up and take different behavior (smaller search) if it's a log
         if (processTreeFellerTargetBlock(block.getRelative(BlockFace.UP), futureCenterBlocks,
-                treeFellerBlocks)) {
+                treeFellerBlocks, trunkOrigin)) {
             for (int[] dir : directions) {
                 processTreeFellerTargetBlock(block.getRelative(dir[0], 0, dir[1]),
-                        futureCenterBlocks, treeFellerBlocks);
+                        futureCenterBlocks, treeFellerBlocks, trunkOrigin);
 
                 if (treeFellerReachedThreshold) {
                     return;
@@ -258,12 +267,12 @@ public class WoodcuttingManager extends SkillManager {
         } else {
             // Cover DOWN
             processTreeFellerTargetBlock(block.getRelative(BlockFace.DOWN), futureCenterBlocks,
-                    treeFellerBlocks);
+                    treeFellerBlocks, trunkOrigin);
             // Search in a cube
             for (int y = -1; y <= 1; y++) {
                 for (int[] dir : directions) {
                     processTreeFellerTargetBlock(block.getRelative(dir[0], y, dir[1]),
-                            futureCenterBlocks, treeFellerBlocks);
+                            futureCenterBlocks, treeFellerBlocks, trunkOrigin);
 
                     if (treeFellerReachedThreshold) {
                         return;
@@ -278,7 +287,7 @@ public class WoodcuttingManager extends SkillManager {
                 return;
             }
 
-            processTree(futureCenterBlock, treeFellerBlocks);
+            processTree(futureCenterBlock, treeFellerBlocks, trunkOrigin);
         }
     }
 
@@ -329,11 +338,12 @@ public class WoodcuttingManager extends SkillManager {
      * @param block Block to be added
      * @param futureCenterBlocks List of blocks that will be used to call 'processTree()'
      * @param treeFellerBlocks List of blocks to be removed
+     * @param trunkOrigin if non-null, logs further than 1 block on the X/Z axes from this block are ignored
      * @return true if and only if the given block was a Log not already in treeFellerBlocks.
      */
     private boolean processTreeFellerTargetBlock(@NotNull Block block,
             @NotNull List<Block> futureCenterBlocks,
-            @NotNull Set<Block> treeFellerBlocks) {
+            @NotNull Set<Block> treeFellerBlocks, Block trunkOrigin) {
         if (treeFellerBlocks.contains(block) || mcMMO.getUserBlockTracker().isIneligible(block)) {
             return false;
         }
@@ -344,6 +354,12 @@ public class WoodcuttingManager extends SkillManager {
         }
 
         if (BlockUtils.hasWoodcuttingXP(block)) {
+            if (trunkOrigin != null
+                    && (Math.abs(block.getX() - trunkOrigin.getX()) > 1
+                    || Math.abs(block.getZ() - trunkOrigin.getZ()) > 1)) {
+                return false; // Log belongs to a neighboring tree
+            }
+
             treeFellerBlocks.add(block);
             futureCenterBlocks.add(block);
             return true;
