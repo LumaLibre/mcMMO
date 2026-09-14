@@ -27,7 +27,9 @@ import com.gmail.nossr50.util.random.ProbabilityUtil;
 import com.gmail.nossr50.util.skills.CombatUtils;
 import com.gmail.nossr50.util.skills.RankUtils;
 import com.gmail.nossr50.util.skills.SkillUtils;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -243,7 +245,23 @@ public class WoodcuttingManager extends SkillManager {
      */
     @VisibleForTesting
     void processTree(Block block, Set<Block> treeFellerBlocks) {
-        processTree(block, treeFellerBlocks, isStraightTrunkTree(block) ? block : null);
+        if (!isStraightTrunkTree(block)) {
+            processTree(block, treeFellerBlocks, null, null);
+            return;
+        }
+
+        final Deque<Block> neighbourTreeSeeds = new ArrayDeque<>();
+        processTree(block, treeFellerBlocks, block, neighbourTreeSeeds);
+
+        // Fell neighboring trees one after another (closest first)
+        while (!treeFellerReachedThreshold && !neighbourTreeSeeds.isEmpty()) {
+            final Block seed = neighbourTreeSeeds.poll();
+            if (treeFellerBlocks.contains(seed)) continue;
+            final Set<Block> withNeighbourTree = new HashSet<>(treeFellerBlocks);
+            withNeighbourTree.add(seed);
+            processTree(seed, withNeighbourTree, isStraightTrunkTree(seed) ? seed : null, neighbourTreeSeeds);
+            if (!treeFellerReachedThreshold) treeFellerBlocks.addAll(withNeighbourTree);
+        }
     }
 
     @VisibleForTesting
@@ -251,15 +269,15 @@ public class WoodcuttingManager extends SkillManager {
         return Tag.SPRUCE_LOGS.isTagged(block.getType());
     }
 
-    private void processTree(Block block, Set<Block> treeFellerBlocks, Block trunkOrigin) {
+    private void processTree(Block block, Set<Block> treeFellerBlocks, Block trunkOrigin, Deque<Block> neighbourTreeSeeds) {
         List<Block> futureCenterBlocks = new ArrayList<>();
 
         // Check the block up and take different behavior (smaller search) if it's a log
         if (processTreeFellerTargetBlock(block.getRelative(BlockFace.UP), futureCenterBlocks,
-                treeFellerBlocks, trunkOrigin)) {
+                treeFellerBlocks, trunkOrigin, neighbourTreeSeeds)) {
             for (int[] dir : directions) {
                 processTreeFellerTargetBlock(block.getRelative(dir[0], 0, dir[1]),
-                        futureCenterBlocks, treeFellerBlocks, trunkOrigin);
+                        futureCenterBlocks, treeFellerBlocks, trunkOrigin, neighbourTreeSeeds);
 
                 if (treeFellerReachedThreshold) {
                     return;
@@ -268,12 +286,13 @@ public class WoodcuttingManager extends SkillManager {
         } else {
             // Cover DOWN
             processTreeFellerTargetBlock(block.getRelative(BlockFace.DOWN), futureCenterBlocks,
-                    treeFellerBlocks, trunkOrigin);
+                    treeFellerBlocks, trunkOrigin, neighbourTreeSeeds);
             // Search in a cube
             for (int y = -1; y <= 1; y++) {
                 for (int[] dir : directions) {
                     processTreeFellerTargetBlock(block.getRelative(dir[0], y, dir[1]),
-                            futureCenterBlocks, treeFellerBlocks, trunkOrigin);
+                            futureCenterBlocks, treeFellerBlocks, trunkOrigin,
+                            neighbourTreeSeeds);
 
                     if (treeFellerReachedThreshold) {
                         return;
@@ -288,7 +307,7 @@ public class WoodcuttingManager extends SkillManager {
                 return;
             }
 
-            processTree(futureCenterBlock, treeFellerBlocks, trunkOrigin);
+            processTree(futureCenterBlock, treeFellerBlocks, trunkOrigin, neighbourTreeSeeds);
         }
     }
 
@@ -340,11 +359,13 @@ public class WoodcuttingManager extends SkillManager {
      * @param futureCenterBlocks List of blocks that will be used to call 'processTree()'
      * @param treeFellerBlocks List of blocks to be removed
      * @param trunkOrigin if non-null, logs further than 1 block on the X/Z axes from this block are ignored
+     * @param neighbourTreeSeeds receives the logs ignored because of trunkOrigin
      * @return true if and only if the given block was a Log not already in treeFellerBlocks.
      */
     private boolean processTreeFellerTargetBlock(@NotNull Block block,
             @NotNull List<Block> futureCenterBlocks,
-            @NotNull Set<Block> treeFellerBlocks, Block trunkOrigin) {
+            @NotNull Set<Block> treeFellerBlocks, Block trunkOrigin,
+            Deque<Block> neighbourTreeSeeds) {
         if (treeFellerBlocks.contains(block) || mcMMO.getUserBlockTracker().isIneligible(block)) {
             return false;
         }
@@ -358,7 +379,9 @@ public class WoodcuttingManager extends SkillManager {
             if (trunkOrigin != null
                     && (Math.abs(block.getX() - trunkOrigin.getX()) > 1
                     || Math.abs(block.getZ() - trunkOrigin.getZ()) > 1)) {
-                return false; // Log belongs to a neighboring tree
+                // Log belongs to a neighboring tree, fell it after this one
+                neighbourTreeSeeds.add(block);
+                return false;
             }
 
             treeFellerBlocks.add(block);
