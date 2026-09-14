@@ -243,6 +243,8 @@ class WoodcuttingTest extends MMOTestEnvironment {
         Mockito.when(generalConfig.getTreeFellerThreshold()).thenReturn(fakeThreshold);
 
         WoodcuttingManager manager = Mockito.spy(new WoodcuttingManager(mmoPlayer));
+        // Tag.SPRUCE_LOGS is null without a server
+        Mockito.doReturn(false).when(manager).isStraightTrunkTree(any(Block.class));
 
         // Simulate all blocks are logs with XP
         MockedStatic<BlockUtils> mockedBlockUtils = mockStatic(BlockUtils.class);
@@ -306,6 +308,8 @@ class WoodcuttingTest extends MMOTestEnvironment {
         Mockito.when(generalConfig.getTreeFellerThreshold()).thenReturn(threshold);
 
         WoodcuttingManager manager = Mockito.spy(new WoodcuttingManager(mmoPlayer));
+        // Tag.SPRUCE_LOGS is null without a server
+        Mockito.doReturn(false).when(manager).isStraightTrunkTree(any(Block.class));
 
         MockedStatic<BlockUtils> mockedBlockUtils = mockStatic(BlockUtils.class);
         mockedBlockUtils.when(() -> BlockUtils.hasWoodcuttingXP(any(Block.class))).thenReturn(true);

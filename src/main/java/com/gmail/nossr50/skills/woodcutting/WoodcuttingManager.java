@@ -246,7 +246,8 @@ public class WoodcuttingManager extends SkillManager {
         processTree(block, treeFellerBlocks, isStraightTrunkTree(block) ? block : null);
     }
 
-    private static boolean isStraightTrunkTree(@NotNull Block block) {
+    @VisibleForTesting
+    boolean isStraightTrunkTree(@NotNull Block block) {
         return Tag.SPRUCE_LOGS.isTagged(block.getType());
     }
 
