@@ -366,7 +366,14 @@ public class WoodcuttingManager extends SkillManager {
             @NotNull List<Block> futureCenterBlocks,
             @NotNull Set<Block> treeFellerBlocks, Block trunkOrigin,
             Deque<Block> neighbourTreeSeeds) {
-        if (treeFellerBlocks.contains(block) || mcMMO.getUserBlockTracker().isIneligible(block)) {
+        if (treeFellerBlocks.contains(block)) {
+            return false;
+        }
+
+        // Check the material before the slower placed-block lookup, as most scanned blocks are air
+        final boolean isLog = BlockUtils.hasWoodcuttingXP(block);
+        if (!isLog && !BlockUtils.isNonWoodPartOfTree(block)
+                || mcMMO.getUserBlockTracker().isIneligible(block)) {
             return false;
         }
 
@@ -375,7 +382,7 @@ public class WoodcuttingManager extends SkillManager {
             treeFellerReachedThreshold = true;
         }
 
-        if (BlockUtils.hasWoodcuttingXP(block)) {
+        if (isLog) {
             if (trunkOrigin != null
                     && (Math.abs(block.getX() - trunkOrigin.getX()) > 1
                     || Math.abs(block.getZ() - trunkOrigin.getZ()) > 1)) {
@@ -387,10 +394,9 @@ public class WoodcuttingManager extends SkillManager {
             treeFellerBlocks.add(block);
             futureCenterBlocks.add(block);
             return true;
-        } else if (BlockUtils.isNonWoodPartOfTree(block)) {
-            treeFellerBlocks.add(block);
-            return false;
         }
+
+        treeFellerBlocks.add(block);
         return false;
     }
 
@@ -404,15 +410,22 @@ public class WoodcuttingManager extends SkillManager {
         int xp = 0;
         int processedLogCount = 0;
         ItemStack itemStack = player.getInventory().getItemInMainHand();
+        final boolean knockOnWood = hasUnlockedSubskill(player,
+                SubSkillType.WOODCUTTING_KNOCK_ON_WOOD);
+        final boolean knockOnWoodXpOrbs = knockOnWood
+                && RankUtils.hasReachedRank(2, player, SubSkillType.WOODCUTTING_KNOCK_ON_WOOD)
+                && mcMMO.p.getAdvancedConfig().isKnockOnWoodXPOrbEnabled();
 
         for (Block block : treeFellerBlocks) {
             int beforeXP = xp;
+            final boolean isLog = BlockUtils.hasWoodcuttingXP(block);
+            final boolean isNonWoodPartOfTree = BlockUtils.isNonWoodPartOfTree(block);
 
             /*
              * Handle Drops & XP
              */
 
-            if (BlockUtils.hasWoodcuttingXP(block)) {
+            if (isLog) {
                 //Add XP
                 xp += processTreeFellerXPGains(block, processedLogCount);
 
@@ -422,14 +435,14 @@ public class WoodcuttingManager extends SkillManager {
 
                 //Bonus Drops / Harvest lumber checks
                 processBonusDropCheck(block);
-            } else if (BlockUtils.isNonWoodPartOfTree(block)) {
+            } else if (isNonWoodPartOfTree) {
                 // 75% of the time do not drop leaf blocks
                 if (ThreadLocalRandom.current().nextInt(100) > 75) {
                     spawnItemsFromCollection(player,
                             getBlockCenter(block),
                             block.getDrops(itemStack),
                             ItemSpawnReason.TREE_FELLER_DISPLACED_BLOCK);
-                } else if (hasUnlockedSubskill(player, SubSkillType.WOODCUTTING_KNOCK_ON_WOOD)) {
+                } else if (knockOnWood) {
                     // if KnockOnWood is unlocked, then drop any saplings from the remaining blocks
                     ItemUtils.spawnItemsConditionally(block.getDrops(itemStack),
                             IS_SAPLING_OR_PROPAGULE,
@@ -445,17 +458,11 @@ public class WoodcuttingManager extends SkillManager {
             // also grant woodcutting XP (e.g. nether/warped wart blocks). Previously this was
             // nested inside the else-if above, which prevented orbs from spawning on nether tree
             // caps because they have woodcutting XP and never reached the else-if branch.
-            if (BlockUtils.isNonWoodPartOfTree(block)
-                    && hasUnlockedSubskill(player, SubSkillType.WOODCUTTING_KNOCK_ON_WOOD)) {
-                if (RankUtils.hasReachedRank(2, player, SubSkillType.WOODCUTTING_KNOCK_ON_WOOD)) {
-                    if (mcMMO.p.getAdvancedConfig().isKnockOnWoodXPOrbEnabled()) {
-                        if (ProbabilityUtil.isStaticSkillRNGSuccessful(
-                                PrimarySkillType.WOODCUTTING, mmoPlayer, 10)) {
-                            int randOrbCount = Math.max(1, Misc.getRandom().nextInt(100));
-                            Misc.spawnExperienceOrb(block.getLocation(), randOrbCount);
-                        }
-                    }
-                }
+            if (isNonWoodPartOfTree && knockOnWoodXpOrbs
+                    && ProbabilityUtil.isStaticSkillRNGSuccessful(
+                    PrimarySkillType.WOODCUTTING, mmoPlayer, 10)) {
+                int randOrbCount = Math.max(1, Misc.getRandom().nextInt(100));
+                Misc.spawnExperienceOrb(block.getLocation(), randOrbCount);
             }
 
             block.setType(Material.AIR);
@@ -500,11 +507,9 @@ public class WoodcuttingManager extends SkillManager {
         if (ExperienceConfig.getInstance().isTreeFellerXPReduced()) {
             int reducedXP = rawXP - (woodCount * 5);
             rawXP = Math.max(1, reducedXP);
-            return rawXP;
-        } else {
-            return ExperienceConfig.getInstance()
-                    .getXp(PrimarySkillType.WOODCUTTING, block.getType());
         }
+
+        return rawXP;
     }
 
     /**
